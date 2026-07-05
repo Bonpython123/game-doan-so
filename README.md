@@ -1,0 +1,219 @@
+[index.html](https://github.com/user-attachments/files/29671576/index.html)
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Đoán Số Tối Giản</title>
+    <style>
+        /* Toàn bộ trang - Thiết lập ảnh nền tương tự tk.PhotoImage và nen.place */
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Arial', sans-serif;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            /* Thay đường dẫn ảnh của bạn vào đây nếu muốn dùng ảnh mạng hoặc ảnh local */
+            background: url('https://picsum.photos/1920/1080') no-repeat center center/cover;
+        }
+
+        /* Khung chứa game - Thay thế cho root.geometry("600x450") */
+        .game-container {
+            width: 600px;
+            height: 450px;
+            background: rgba(255, 255, 255, 0.85); /* Nền trắng mờ để lộ ảnh nền phía sau */
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        /* Thanh Menu giả lập (File -> Exit) */
+        .menu-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background: #f1f1f1;
+            border-top-left-radius: 15px;
+            border-top-right-radius: 15px;
+            font-size: 14px;
+        }
+        .menu-item {
+            position: relative;
+            display: inline-block;
+            padding: 8px 16px;
+            cursor: pointer;
+        }
+        .menu-item:hover { background: #e0e0e0; }
+        .dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: white;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            min-width: 100px;
+            z-index: 10;
+        }
+        .dropdown a {
+            display: block;
+            padding: 8px 16px;
+            text-decoration: none;
+            color: black;
+        }
+        .dropdown a:hover { background: #f5f5f5; }
+        .menu-item:hover .dropdown { display: block; }
+
+        /* Tiêu đề - Thay thế cho tieu = tk.Label(...) */
+        h1 {
+            font-size: 40px;
+            font-weight: bold;
+            color: black;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        /* Ô nhập số - Thay thế cho o = tk.Entry(...) */
+        input[type="number"] {
+            font-size: 24px;
+            text-align: center;
+            width: 160px;
+            padding: 5px;
+            border: 2px solid #ccc;
+            border-radius: 5px;
+            outline: none;
+        }
+
+        /* Nút kiểm tra - Thay thế cho kiem_tra = tk.Button(...) */
+        .btn-check {
+            font-size: 18px;
+            font-weight: bold;
+            background-color: #27ae60;
+            color: white;
+            border: none;
+            padding: 10px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 15px;
+            transition: background 0.2s;
+        }
+        .btn-check:hover { background-color: #219653; }
+        .btn-check:disabled { background-color: #95a5a6; cursor: not-allowed; }
+
+        /* Vùng hiển thị kết quả đáy giao diện (side="bottom") */
+        .bottom-area {
+            margin-top: auto;
+            text-align: center;
+            width: 100%;
+        }
+
+        /* Thay thế cho bao = tk.Label(...) */
+        #bao {
+            font-size: 20px;
+            font-weight: bold;
+            background-color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            display: inline-block;
+            margin-bottom: 5px;
+            min-height: 30px;
+        }
+
+        /* Thay thế cho cuoi = tk.Label(...) */
+        #cuoi {
+            font-size: 14px;
+            font-style: italic;
+            color: #555;
+            min-height: 20px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="game-container">
+        <div class="menu-bar">
+            <div class="menu-item">
+                File
+                <div class="dropdown">
+                    <a href="#" onclick="window.close(); return false;">Exit</a>
+                </div>
+            </div>
+        </div>
+
+        <h1>ĐOÁN SỐ</h1>
+        
+        <input type="number" id="o" min="1" max="100" placeholder="1-100">
+        
+        <button class="btn-check" id="kiem_tra" onclick="xu_ly_click()">Kiểm tra</button>
+
+        <div class="bottom-area">
+            <div><span id="bao"></span></div>
+            <div id="cuoi"></div>
+        </div>
+    </div>
+
+    <script>
+        // Khởi tạo các biến tương tự Python
+        let t = Math.floor(Math.random() * 100) + 1; // Số ngẫu nhiên từ 1 - 100
+        let d = 0; // Đếm số lần thử
+
+        // Hàm xử lý khi click nút giống def xu_ly_click():
+        function xu_ly_click() {
+            const oInput = document.getElementById('o');
+            const baoLabel = document.getElementById('bao');
+            const cuoiLabel = document.getElementById('cuoi');
+            const btnKiemTra = document.getElementById('kiem_tra');
+
+            // Lấy giá trị và chuyển thành số nguyên
+            let n = parseInt(oInput.value);
+
+            // Kiểm tra bẫy lỗi nếu để trống hoặc gõ ký tự lạ
+            if (isNaN(n)) {
+                baoLabel.innerText = "Vui lòng nhập một số nguyên!";
+                baoLabel.style.color = "maroon";
+                return;
+            }
+
+            d++; // Tăng số lần thử
+
+            // Logic so sánh tương đương Python
+            if (n < 1 || n > 100) {
+                baoLabel.innerText = "Vui lòng nhập từ 1 - 100!";
+                baoLabel.style.color = "maroon";
+            } else if (n < t) {
+                baoLabel.innerText = "QUÁ NHỎ!";
+                baoLabel.style.color = "green";
+                cuoiLabel.innerText = `Số lần thử: ${d}`;
+            } else if (n > t) {
+                baoLabel.innerText = "QUÁ LỚN!";
+                baoLabel.style.color = "red";
+                cuoiLabel.innerText = `Số lần thử: ${d}`;
+            } else {
+                baoLabel.innerText = "CHÍNH XÁC!";
+                baoLabel.style.color = "orange";
+                cuoiLabel.innerText = `Bạn đã đoán trúng sau ${d} lần thử.`;
+                
+                // Khóa input và button khi thắng cuộc giống state="disabled"
+                oInput.disabled = true;
+                btnKiemTra.disabled = true;
+            }
+        }
+
+        // Thêm tính năng gõ Enter để kiểm tra cho tiện lợi
+        document.getElementById('o').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                xu_ly_click();
+            }
+        });
+    </script>
+
+</body>
+</html>
