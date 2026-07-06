@@ -1,0 +1,2117 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.parse
+import time
+import json
+import random
+import re
+import os
+
+# ─────────────────────────────────────────
+#  VÒNG 1 – Mỗi thí sinh 1 câu, lần lượt
+# ─────────────────────────────────────────
+ROUND1_QUESTIONS = [
+    {
+        "question": "O2 là gì?",
+        "answers": ["oxygen", "oxy", "không khí", "o xy", "oxi"]
+    },
+    {
+        "question": "Oslo là thủ đô của nước nào?",
+        "answers": ["na uy", "nauy", "norway", "na-uy"]
+    },
+    {
+        "question": "Từ 1 đến 100 có bao nhiêu số chia hết cho cả 2 và 5 (tính cả 1 và 100)?",
+        "answers": ["10", "10 số", "mười", "muoi", "10 so"]
+    },
+    {
+        "question": 'Trong bài "Cây đa quê hương" (SGK Tiếng Việt lớp 4 Tập 2), rễ được miêu tả như con gì?',
+        "answers": [
+            "rắn", "ran", "rắn hổ mang", "ran ho mang",
+            "con rắn", "con ran", "con rắn hổ mang", "con ran ho mang",
+            "con rắn hổ mang giận dữ", "con rắn giận dữ",
+            "rắn hổ mang giận dữ", "rắn giận dữ"
+        ]
+    },
+]
+
+# ─────────────────────────────────────────
+#  VÒNG 2 – Bấm chuông, 6 câu chung
+# ─────────────────────────────────────────
+ROUND2_QUESTIONS = [
+    {
+        "question": "Thủ đô Niger là gì?",
+        "answers": ["ni a mây", "niamey", "nia mây", "ni-a-mây", "ni a may", "niamay"]
+    },
+    {
+        "question": "Ở Hà Nội (Việt Nam) đang là 4 giờ (UTC+7) thì ở Berlin (Đức) đang là mấy giờ (UTC+1) vào mùa hè?",
+        "answers": ["11", "11 giờ", "mười một", "mười một giờ", "muoi mot", "muoi mot gio"]
+    },
+    {
+        "question": 'Từ "OLYMPIA" có bao nhiêu gạch thẳng (theo chữ VNARIAL, không tính gạch chéo và ngang)?',
+        "answers": ["6", "sáu", "6 gạch", "sáu gạch", "6 gạch thẳng", "sáu gạch thẳng"]
+    },
+    {
+        "question": "Minh viết một số có hai chữ số lên bảng, sau đó xoá chữ số thứ hai đi. Số bây giờ bé hơn số ban đầu 37 đơn vị. Tìm số ban đầu Minh viết?",
+        "answers": ["41", "bốn mươi mốt", "bốn mươi một", "bốn mốt", "bon muoi mot", "bon mot"]
+    },
+    {
+        "question": 'Những ngày lộng gió, từ bờ tre làng, tôi nhìn thấy những cánh buồm căng phồng như gì? (SGK Tiếng Việt lớp 4 Tập 2, trang 98, KNTT – bài "Những cánh buồm")',
+        "answers": [
+            "ngực", "ngực người khổng lồ",
+            "ngực người khổng lồ đẩy thuyền đi đến chốn",
+            "về đến nơi", "mọi ngả mọi miền",
+            "cần cù nhẫn nại", "suốt năm suốt tháng",
+            "bất kể ngày đêm"
+        ]
+    },
+    {
+        "question": "How many nouns are there in this sentence? \"We watch cartoons before dinner at seven o'clock in the evening.\"",
+        "answers": [
+            "there are four", "there're four", "four", "4",
+            "four nouns", "4 nouns",
+            "there are four nouns", "there're four nouns",
+            "there are 4 nouns", "there're 4 nouns"
+        ]
+    },
+]
+
+TIME_PER_QUESTION = 20
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVE_FILE  = os.path.join(SCRIPT_DIR, "olympia_state.json")
+
+
+def save_persistent_state():
+    """Lưu dữ liệu bền vững ra file JSON."""
+    data = {
+        "banned_emails":   list(banned_emails),
+        "finalist_emails": list(finalist_emails),
+        "player_emails":   player_emails,
+        "week_results":    week_results,
+        "finals_players":  finals_players,
+        "finals_mode":     finals_mode,
+    }
+    try:
+        with open(SAVE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] Không lưu được state: {e}")
+
+
+def load_persistent_state():
+    """Đọc dữ liệu bền vững từ file JSON khi khởi động."""
+    global banned_emails, finalist_emails, player_emails, week_results, finals_players, finals_mode
+    if not os.path.exists(SAVE_FILE):
+        return
+    try:
+        with open(SAVE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        banned_emails   = set(data.get("banned_emails",   []))
+        finalist_emails = set(data.get("finalist_emails", []))
+        player_emails   = data.get("player_emails",  {})
+        week_results    = data.get("week_results",   [])
+        finals_players  = data.get("finals_players", [])
+        finals_mode     = data.get("finals_mode",    False)
+        print(f"[INFO] Đã load state: {len(week_results)} tuần, finals_mode={finals_mode}")
+    except Exception as e:
+        print(f"[WARN] Không đọc được state: {e}")
+
+# ─────────────────────────────────────────
+#  VONG 3 – Vuot chuong ngai vat
+# ─────────────────────────────────────────
+ROUND3_KEYWORD = "Nước"
+ROUND3_PIECES  = [
+    {
+        "question":   "Một số loại như coca, pepsi, nước chanh, … Thường ở dưới dạng gì?",
+        "char_count": 8,
+        "answers":    ["chất lỏng", "chat long"],
+    },
+    {
+        "question":   "Kính, mưa, biển, … có chủ yếu là màu gì?",
+        "char_count": 8,
+        "answers":    ["không màu", "khong mau"],
+    },
+    {
+        "question":   "Học, học nữa, học mãi là điều … đối với mỗi con người. (Vladimir Lenin)",
+        "char_count": 8,
+        "answers":    ["cần thiết", "can thiet"],
+    },
+    {
+        "question":   "14 × 31 − 26 × 14 = ?",
+        "char_count": 2,
+        "answers":    ["70", "bảy mươi", "bay muoi"],
+    },
+]
+R3_KEYWORD_ANSWERS = ["nước", "nuoc"]
+R3_TIME       = 20
+R3_FINAL_TIME = 30
+
+# ─────────────────────────────────────────
+#  TRẠNG THÁI GAME
+# ─────────────────────────────────────────
+online_players = {}
+game_started   = False
+banned_emails   = set()   # email bị ban (hạng 4 hoặc đã vào chung kết)
+finalist_emails = set()   # email đã vào chung kết (hạng 1)
+player_emails   = {}      # { tên → email }
+week_results    = []      # [{winner, winner_score, runner_up, runner_up_score, loser}]
+# Chung kết khi đủ 3 tuần: 3 hạng 1 + hạng 2 điểm cao nhất
+finals_players  = []      # danh sách 4 tên vào chung kết
+finals_mode     = False   # True khi đang ở chế độ chung kết
+game_state     = {
+    "phase":          "lobby",
+    "player_order":   [],
+    "r1_questions":   [],
+    "r2_questions":   [],
+    "r1_idx":         0,
+    "r2_idx":         0,
+    "q_start_time":   0,
+    "current_answer": {},
+    "scores":         {},
+    "buzzer_player":  None,
+    "buzzer_locked":  False,
+    # Vòng 3
+    "r3_turn_idx":    0,
+    "r3_pieces":      [],
+    "r3_cur_piece":   None,
+    "r3_submitted":   {},
+    "r3_eliminated":  [],
+    "r3_final_mode":  False,
+    "r3_buzzer":      None,
+    "r3_buzzer_locked": False,
+    "r3_paused_remaining": None,  # thời gian còn lại khi bị dừng vì nút đỏ
+    "r3_keyword_player": None,    # người đang trả lời từ khoá (nút đỏ giữa chừng)
+}
+
+
+def normalize(s: str) -> str:
+    """Chuẩn hoá: thường, bỏ dấu .,_ (vòng 3 cũng bỏ dấu chấm phẩy phẩy)"""
+    s = s.lower().strip()
+    s = re.sub(r'[.,_]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def check_answer(player_answer: str, correct_list: list) -> bool:
+    pa = normalize(player_answer)
+    return any(pa == normalize(a) for a in correct_list)
+
+
+def get_status():
+    gs    = game_state
+    phase = gs["phase"]
+    base  = {
+        "phase":          phase,
+        "player_order":   gs["player_order"],
+        "scores":         gs["scores"],
+        "r1_idx":         gs["r1_idx"],
+        "r2_idx":         gs["r2_idx"],
+        "current_answer": gs["current_answer"],
+        "buzzer_player":  gs["buzzer_player"],
+        "buzzer_locked":  gs["buzzer_locked"],
+    }
+
+    now = time.time()
+
+    if phase == "r1_question":
+        elapsed   = now - gs["q_start_time"]
+        remaining = max(0, TIME_PER_QUESTION - elapsed)
+        cur_player = gs["player_order"][gs["r1_idx"]]
+        base.update({
+            "question":      gs["r1_questions"][gs["r1_idx"]]["question"],
+            "remaining":     round(remaining, 2),
+            "current_player": cur_player,
+        })
+        if remaining <= 0 and cur_player not in gs["current_answer"]:
+            gs["current_answer"][cur_player] = {"answer": "(Hết giờ)", "correct": False}
+            gs["phase"] = "r1_result"
+            base["phase"] = "r1_result"
+
+    if phase == "r1_result":
+        base.update({
+            "question":      gs["r1_questions"][gs["r1_idx"]]["question"],
+            "current_player": gs["player_order"][gs["r1_idx"]],
+        })
+
+    if phase == "r2_question":
+        base.update({
+            "question": gs["r2_questions"][gs["r2_idx"]]["question"],
+            "remaining": TIME_PER_QUESTION,
+        })
+
+    if phase == "r2_buzzer_wait":
+        base.update({
+            "question": gs["r2_questions"][gs["r2_idx"]]["question"],
+        })
+
+    if phase == "r2_answer_wait":
+        elapsed   = now - gs["q_start_time"]
+        remaining = max(0, TIME_PER_QUESTION - elapsed)
+        base.update({
+            "question":  gs["r2_questions"][gs["r2_idx"]]["question"],
+            "remaining": round(remaining, 2),
+        })
+        if remaining <= 0:
+            p = gs["buzzer_player"]
+            if p and p not in gs["current_answer"]:
+                gs["current_answer"][p] = {"answer": "(Hết giờ)", "correct": False}
+            gs["phase"] = "r2_result"
+            base["phase"] = "r2_result"
+
+    if phase == "r2_result":
+        base.update({
+            "question": gs["r2_questions"][gs["r2_idx"]]["question"],
+        })
+
+    # ── Vòng 3 phases ────────────────────────────────────────────────
+    if phase in ("r3_start", "r3_choose", "r3_answering", "r3_result",
+                 "r3_final_wait", "r3_final_buzzer", "r3_final_answer",
+                 "r3_final_result", "r3_keyword_correct"):
+        now2 = time.time()
+        remaining3 = 0
+        if phase == "r3_answering":
+            if gs["r3_paused_remaining"] is not None:
+                remaining3 = gs["r3_paused_remaining"]
+            else:
+                remaining3 = max(0, R3_TIME - (now2 - gs["q_start_time"]))
+            # Không auto reveal – chờ admin bấm Reveal
+        if phase == "r3_final_answer":
+            remaining3 = max(0, R3_FINAL_TIME - (now2 - gs["q_start_time"]))
+            if remaining3 <= 0:
+                buzzer = gs["r3_buzzer"]
+                if buzzer and buzzer not in gs["r3_submitted"]:
+                    gs["r3_submitted"][buzzer] = "(Hết giờ)"
+                gs["phase"] = "r3_final_result"
+                base["phase"] = "r3_final_result"
+        if phase == "r3_final_wait":
+            remaining3 = max(0, R3_FINAL_TIME - (now2 - gs["q_start_time"]))
+            if remaining3 <= 0:
+                gs["phase"] = "finished"
+                base["phase"] = "finished"
+        base.update({
+            "r3_turn_idx":     gs["r3_turn_idx"],
+            "r3_pieces":       gs["r3_pieces"],
+            "r3_cur_piece":    gs["r3_cur_piece"],
+            "r3_submitted":    gs["r3_submitted"],
+            "r3_eliminated":   gs["r3_eliminated"],
+            "r3_final_mode":   gs["r3_final_mode"],
+            "r3_buzzer":       gs["r3_buzzer"],
+            "r3_buzzer_locked": gs["r3_buzzer_locked"],
+            "r3_paused":        gs["r3_paused_remaining"] is not None,
+            "r3_keyword_player": gs["r3_keyword_player"],
+            "remaining":       round(remaining3, 2),
+            "r3_questions":    [p["question"] for p in ROUND3_PIECES],
+            "r3_char_counts":  [p["char_count"] for p in ROUND3_PIECES],
+        })
+        if gs["r3_cur_piece"] is not None:
+            base["r3_cur_question"] = ROUND3_PIECES[gs["r3_cur_piece"]]["question"]
+
+    return base
+
+
+def r1_advance():
+    gs = game_state
+    gs["r1_idx"] += 1
+    gs["current_answer"] = {}
+    if gs["r1_idx"] >= len(gs["player_order"]):
+        gs["phase"] = "r2_start"
+    else:
+        gs["phase"]        = "r1_question"
+        gs["q_start_time"] = time.time()
+
+
+def r2_advance():
+    gs = game_state
+    gs["r2_idx"] += 1
+    gs["current_answer"] = {}
+    gs["buzzer_player"]  = None
+    gs["buzzer_locked"]  = False
+    gs["q_start_time"]   = 0
+    if gs["r2_idx"] >= len(gs["r2_questions"]):
+        gs["phase"] = "r3_start"
+    else:
+        gs["phase"] = "r2_question"
+
+
+
+def r3_next_turn(stay=False):
+    """Chuyển lượt trong vòng 3 (bỏ qua người bị loại).
+    stay=True: không advance idx, giữ nguyên vị trí (dùng khi người hiện tại bị loại).
+    """
+    gs = game_state
+    players = gs["player_order"]
+    elim    = gs["r3_eliminated"]
+    pieces  = gs["r3_pieces"]
+    # Kiểm tra còn mảnh nào chưa bị xử lý (locked) không
+    # picked=True nhưng locked=False nghĩa là đang answering → vẫn còn
+    any_open = any(not p["locked"] and not p.get("picked", False) for p in pieces)
+    if not any_open and gs["phase"] not in ("r3_answering",):
+        # Hết mảnh → 30 giây đoán từ khoá cuối
+        active = [p for p in players if p not in elim]
+        if not active:
+            gs["phase"] = "finished"
+            return
+        gs["phase"]               = "r3_final_wait"
+        gs["r3_final_mode"]       = True
+        gs["q_start_time"]        = time.time()
+        gs["r3_buzzer"]           = None
+        gs["r3_buzzer_locked"]    = False
+        gs["r3_submitted"]        = {}
+        gs["r3_paused_remaining"] = None
+        gs["r3_keyword_player"]   = None
+        return
+    # Tìm người tiếp theo chưa bị loại
+    n = len(players)
+    if not stay:
+        # advance 1 bước trước
+        for _ in range(n):
+            gs["r3_turn_idx"] = (gs["r3_turn_idx"] + 1) % n
+            candidate = players[gs["r3_turn_idx"]]
+            if candidate not in elim:
+                break
+    else:
+        # Không advance, chỉ tìm người chưa bị loại từ vị trí hiện tại trở đi
+        for _ in range(n):
+            candidate = players[gs["r3_turn_idx"]]
+            if candidate not in elim:
+                break
+            gs["r3_turn_idx"] = (gs["r3_turn_idx"] + 1) % n
+    gs["phase"]               = "r3_choose"
+    gs["r3_cur_piece"]        = None
+    gs["r3_submitted"]        = {}
+    gs["r3_paused_remaining"] = None
+    gs["r3_keyword_player"]   = None
+
+
+def r3_all_eliminated():
+    gs = game_state
+    active = [p for p in gs["player_order"] if p not in gs["r3_eliminated"]]
+    return len(active) == 0
+
+
+def record_week_result():
+    """Ghi nhận kết quả tuần, ban hạng 4, ban hạng 1 (finalist), lưu hạng 2."""
+    global week_results, finals_players, finals_mode
+    gs      = game_state
+    scores  = gs["scores"]
+    players = gs["player_order"]
+    sorted_p = sorted(players, key=lambda p: scores.get(p, 0), reverse=True)
+    if len(sorted_p) < 4:
+        return
+
+    winner      = sorted_p[0]
+    runner_up   = sorted_p[1]
+    runner_up_s = scores.get(runner_up, 0)
+    loser       = sorted_p[3]
+
+    # Lưu kết quả tuần
+    week_results.append({
+        "winner":         winner,
+        "winner_score":   scores.get(winner, 0),
+        "runner_up":      runner_up,
+        "runner_up_score": runner_up_s,
+        "loser":          loser,
+    })
+
+    # Ban hạng 4
+    loser_email = player_emails.get(loser, "").lower().strip()
+    if loser_email:
+        banned_emails.add(loser_email)
+
+    # Ban hạng 1 (vào chung kết)
+    winner_email = player_emails.get(winner, "").lower().strip()
+    if winner_email:
+        finalist_emails.add(winner_email)
+        banned_emails.add(winner_email)   # cũng ban để không vào vòng tuần
+
+    # Kiểm tra đủ 3 tuần → chốt chung kết
+    if len(week_results) >= 3 and not finals_mode:
+        # 3 hạng 1
+        finalists = [w["winner"] for w in week_results[:3]]
+        # Hạng 2 điểm cao nhất trong 3 tuần
+        best_r2 = max(week_results[:3], key=lambda w: w["runner_up_score"])
+        finalists.append(best_r2["runner_up"])
+        finals_players = finalists
+        finals_mode    = True
+    save_persistent_state()
+
+
+# ─────────────────────────────────────────
+#  HTTP HANDLER
+# ─────────────────────────────────────────
+class MyWebHandler(BaseHTTPRequestHandler):
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def json_response(self, data: dict):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_file(self, filepath: str, mime: str):
+        try:
+            with open(filepath, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-type", mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_GET(self):
+        global game_started, game_state, online_players, week_results, finals_players, finals_mode
+
+        parsed = urllib.parse.urlparse(self.path)
+        path   = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/kd_chung.mp3":
+            self.serve_file(os.path.join(SCRIPT_DIR, "kd_chung.mp3"), "audio/mpeg")
+            return
+
+        if path == "/dap3.jpg":
+            self.serve_file(os.path.join(SCRIPT_DIR, "dap3.jpg"), "image/jpeg")
+            return
+
+        if "status" in params:
+            self.json_response(get_status())
+            return
+
+        if "start_game" in params:
+            game_started = True
+            order = list(online_players.keys())
+            r1_qs = random.sample(ROUND1_QUESTIONS, len(ROUND1_QUESTIONS))
+            r2_qs = random.sample(ROUND2_QUESTIONS, len(ROUND2_QUESTIONS))
+            game_state.update({
+                "phase":          "start",
+                "player_order":   order,
+                "r1_questions":   r1_qs,
+                "r2_questions":   r2_qs,
+                "r1_idx":         0,
+                "r2_idx":         0,
+                "q_start_time":   0,
+                "current_answer": {},
+                "scores":         {p: 0 for p in order},
+                "buzzer_player":  None,
+                "buzzer_locked":  False,
+                "r3_turn_idx":    -1,
+                "r3_pieces":      [{"locked": False, "correct": False, "answered_by": None, "picked": False} for _ in range(4)],
+                "r3_cur_piece":   None,
+                "r3_submitted":   {},
+                "r3_eliminated":  [],
+                "r3_final_mode":  False,
+                "r3_buzzer":      None,
+                "r3_buzzer_locked": False,
+            })
+            self.json_response({"status": "ok", "players": order})
+            return
+
+        if "begin_r1" in params:
+            if game_state["phase"] == "start":
+                game_state["phase"]        = "r1_question"
+                game_state["q_start_time"] = time.time()
+            self.json_response({"status": "ok"})
+            return
+
+        if "next_r1" in params:
+            if game_state["phase"] == "r1_result":
+                r1_advance()
+            self.json_response(get_status())
+            return
+
+        if "begin_r2" in params:
+            if game_state["phase"] == "r2_start":
+                game_state["phase"] = "r2_question"
+            self.json_response({"status": "ok"})
+            return
+
+        if "buzzer" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            if (gs["phase"] == "r2_question"
+                    and not gs["buzzer_locked"]
+                    and player in gs["player_order"]):
+                gs["buzzer_player"] = player
+                gs["buzzer_locked"] = True
+                gs["phase"]         = "r2_buzzer_wait"
+            self.json_response({"status": "ok"})
+            return
+
+        if "admin_ok" in params:
+            if game_state["phase"] == "r2_buzzer_wait":
+                game_state["phase"]        = "r2_answer_wait"
+                game_state["q_start_time"] = time.time()
+            self.json_response({"status": "ok"})
+            return
+
+        if "submit_r1" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            answer = params.get("answer", [""])[0]
+            cur    = gs["player_order"][gs["r1_idx"]]
+            if (gs["phase"] == "r1_question"
+                    and player == cur
+                    and player not in gs["current_answer"]):
+                correct = check_answer(answer, gs["r1_questions"][gs["r1_idx"]]["answers"])
+                gs["current_answer"][player] = {"answer": answer, "correct": correct}
+                if correct:
+                    gs["scores"][player] = gs["scores"].get(player, 0) + 10
+                gs["phase"] = "r1_result"
+            self.json_response({"status": "ok"})
+            return
+
+        if "submit_r2" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            answer = params.get("answer", [""])[0]
+            if (gs["phase"] == "r2_answer_wait"
+                    and player == gs["buzzer_player"]
+                    and player not in gs["current_answer"]):
+                correct = check_answer(answer, gs["r2_questions"][gs["r2_idx"]]["answers"])
+                gs["current_answer"][player] = {"answer": answer, "correct": correct}
+                if correct:
+                    gs["scores"][player] = gs["scores"].get(player, 0) + 10
+                gs["phase"] = "r2_result"
+            self.json_response({"status": "ok"})
+            return
+
+        if "next_r2" in params:
+            if game_state["phase"] == "r2_result":
+                r2_advance()
+            self.json_response(get_status())
+            return
+
+        # ── Bắt đầu vòng 3 (admin) ────────────────────────────────────
+        if "begin_r3" in params:
+            if game_state["phase"] == "r3_start":
+                game_state["phase"]      = "r3_choose"
+                game_state["r3_turn_idx"] = 0
+                # Bỏ qua người bị loại từ đầu
+                players = game_state["player_order"]
+                elim    = game_state["r3_eliminated"]
+                for i, p in enumerate(players):
+                    if p not in elim:
+                        game_state["r3_turn_idx"] = i
+                        break
+            self.json_response(get_status())
+            return
+
+        # ── Thí sinh chọn mảnh ghép ───────────────────────────────────
+        if "r3_pick" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            piece  = params.get("piece",  [None])[0]
+            if piece is not None:
+                piece = int(piece)
+            cur_player = gs["player_order"][gs["r3_turn_idx"]]
+            if (gs["phase"] == "r3_choose"
+                    and player == cur_player
+                    and player not in gs["r3_eliminated"]
+                    and piece is not None
+                    and 0 <= piece < 4
+                    and not gs["r3_pieces"][piece]["locked"]
+                    and not gs["r3_pieces"][piece].get("picked", False)):
+                gs["r3_cur_piece"]            = piece
+                gs["r3_pieces"][piece]["picked"] = True
+                gs["phase"]                   = "r3_answering"
+                gs["q_start_time"]            = time.time()
+                gs["r3_submitted"]            = {}
+                gs["r3_paused_remaining"]     = None
+                gs["r3_keyword_player"]       = None
+            self.json_response(get_status())
+            return
+
+        # ── Thí sinh nộp đáp án mảnh ghép (giữ lại, chờ hết giờ) ─────
+        if "r3_submit" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            answer = params.get("answer", [""])[0]
+            if (gs["phase"] == "r3_answering"
+                    and player in gs["player_order"]
+                    and player not in gs["r3_eliminated"]
+                    and player not in gs["r3_submitted"]):
+                gs["r3_submitted"][player] = answer
+            self.json_response({"status": "ok"})
+            return
+
+        # ── Server tự reveal khi hết giờ (admin bấm next hoặc timeout) ─
+        if "r3_reveal" in params:
+            gs    = game_state
+            piece = gs["r3_cur_piece"]
+            if gs["phase"] in ("r3_answering", "r3_result"):
+                results = {}
+                any_correct = False
+                active = [p for p in gs["player_order"] if p not in gs["r3_eliminated"]]
+                for p in active:
+                    ans = gs["r3_submitted"].get(p, "")
+                    if ans == "":
+                        ans = "(Hết giờ)"
+                    correct = check_answer(ans, ROUND3_PIECES[piece]["answers"]) if ans != "(Hết giờ)" else False
+                    results[p] = {"answer": ans, "correct": correct}
+                    if correct:
+                        gs["scores"][p] = gs["scores"].get(p, 0) + 15
+                        any_correct = True
+                gs["r3_pieces"][piece]["locked"]  = True
+                gs["r3_pieces"][piece]["correct"] = any_correct
+                gs["current_answer"] = results
+                gs["phase"] = "r3_result"
+            self.json_response(get_status())
+            return
+
+        # ── Admin next sau khi xem kết quả mảnh ghép ──────────────────
+        if "r3_next" in params:
+            gs = game_state
+            if gs["phase"] == "r3_result":
+                r3_next_turn()
+            self.json_response(get_status())
+            return
+
+        # ── Nút đỏ: yêu cầu đoán từ khoá (dừng timer nếu đang answering) ──
+        if "r3_keyword_request" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            if (player in gs["player_order"]
+                    and player not in gs["r3_eliminated"]
+                    and gs["r3_keyword_player"] is None
+                    and gs["phase"] in ("r3_choose", "r3_answering", "r3_result",
+                                        "r3_final_wait")):
+                # Lưu thời gian còn lại nếu đang answering
+                if gs["phase"] == "r3_answering" and gs["r3_paused_remaining"] is None:
+                    elapsed = time.time() - gs["q_start_time"]
+                    gs["r3_paused_remaining"] = max(0, R3_TIME - elapsed)
+                gs["r3_keyword_player"] = player
+            self.json_response(get_status())
+            return
+
+        # ── Nộp đáp án từ khoá (từ nút đỏ) ───────────────────────────
+        if "r3_keyword" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            answer = params.get("answer", [""])[0]
+            if (player in gs["player_order"]
+                    and player not in gs["r3_eliminated"]
+                    and gs["phase"] in ("r3_choose", "r3_answering", "r3_result",
+                                        "r3_final_wait", "r3_final_buzzer",
+                                        "r3_final_answer", "r3_final_result")):
+                correct = check_answer(answer, R3_KEYWORD_ANSWERS)
+                if correct:
+                    gs["scores"][player] = gs["scores"].get(player, 0) + 50
+                    gs["phase"] = "r3_keyword_correct"
+                    gs["current_answer"] = {player: {"answer": answer, "correct": True}}
+                    gs["r3_paused_remaining"] = None
+                    gs["r3_keyword_player"]   = None
+                else:
+                    gs["r3_eliminated"].append(player)
+                    gs["r3_keyword_player"] = None
+                    # Nếu đang dừng timer → tiếp tục lại
+                    if gs["r3_paused_remaining"] is not None:
+                        gs["q_start_time"]        = time.time() - (R3_TIME - gs["r3_paused_remaining"])
+                        gs["r3_paused_remaining"]  = None
+                    # Nếu đang là lượt người này chọn ô → chuyển lượt
+                    if gs["phase"] == "r3_choose":
+                        cur = gs["player_order"][gs["r3_turn_idx"]]
+                        if cur == player:
+                            # D bị loại, advance sang người kế tiếp
+                            r3_next_turn(stay=False)
+                    if r3_all_eliminated():
+                        gs["phase"] = "finished"
+            self.json_response(get_status())
+            return
+
+        # ── Bấm chuông vòng 3 final ────────────────────────────────────
+        if "r3_buzzer" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            if (gs["phase"] == "r3_final_wait"
+                    and not gs["r3_buzzer_locked"]
+                    and player in gs["player_order"]
+                    and player not in gs["r3_eliminated"]):
+                gs["r3_buzzer"]        = player
+                gs["r3_buzzer_locked"] = True
+                gs["phase"]            = "r3_final_buzzer"
+            self.json_response({"status": "ok"})
+            return
+
+        # ── Admin OK cho phép trả lời chuông final ────────────────────
+        if "r3_admin_ok" in params:
+            if game_state["phase"] == "r3_final_buzzer":
+                game_state["phase"]        = "r3_final_answer"
+                game_state["q_start_time"] = time.time()
+                game_state["r3_submitted"] = {}
+            self.json_response({"status": "ok"})
+            return
+
+        # ── Nộp đáp án chuông final ───────────────────────────────────
+        if "r3_final_submit" in params:
+            gs     = game_state
+            player = params.get("player", [None])[0]
+            answer = params.get("answer", [""])[0]
+            buzzer = gs["r3_buzzer"]
+            if (gs["phase"] == "r3_final_answer"
+                    and player == buzzer
+                    and player not in gs["r3_submitted"]):
+                gs["r3_submitted"][player] = answer
+                correct = check_answer(answer, R3_KEYWORD_ANSWERS)
+                if correct:
+                    gs["scores"][player] = gs["scores"].get(player, 0) + 50
+                    gs["phase"] = "r3_keyword_correct"
+                    gs["current_answer"] = {player: {"answer": answer, "correct": True}}
+                else:
+                    gs["r3_eliminated"].append(player)
+                    gs["current_answer"] = {player: {"answer": answer, "correct": False}}
+                    # Reset buzzer, cho người khác bấm lại
+                    gs["r3_buzzer"]        = None
+                    gs["r3_buzzer_locked"] = False
+                    gs["phase"]            = "r3_final_wait"
+                    if r3_all_eliminated():
+                        gs["phase"] = "finished"
+            self.json_response(get_status())
+            return
+
+        # ── Admin kết thúc hẳn (sau keyword_correct) ──────────────────
+        if "r3_finish" in params:
+            gs = game_state
+            if gs["phase"] in ("r3_keyword_correct", "r3_final_wait", "finished"):
+                gs["phase"] = "finished"
+                record_week_result()
+            self.json_response(get_status())
+            return
+
+
+        if "reset_game" in params:
+            game_started = False
+            online_players.clear()
+            game_state.update({
+                "phase": "lobby", "player_order": [], "r1_idx": 0, "r2_idx": 0,
+                "current_answer": {}, "scores": {}, "buzzer_player": None, "buzzer_locked": False,
+                "r3_turn_idx": 0, "r3_pieces": [], "r3_cur_piece": None,
+                "r3_submitted": {}, "r3_eliminated": [], "r3_final_mode": False,
+                "r3_buzzer": None, "r3_buzzer_locked": False,
+            })
+            self.json_response({"status": "ok"})
+            return
+
+        # ── Admin reset toàn bộ (xoá cả tuần) ────────────────────────
+        if "reset_all" in params:
+            game_started = False
+            online_players.clear()
+            banned_emails.clear()
+            finalist_emails.clear()
+            week_results.clear()
+            finals_players.clear()
+            finals_mode = False
+            player_emails.clear()
+            save_persistent_state()
+            game_state.update({
+                "phase": "lobby", "player_order": [], "r1_idx": 0, "r2_idx": 0,
+                "current_answer": {}, "scores": {}, "buzzer_player": None, "buzzer_locked": False,
+                "r3_turn_idx": 0, "r3_pieces": [], "r3_cur_piece": None,
+                "r3_submitted": {}, "r3_eliminated": [], "r3_final_mode": False,
+                "r3_buzzer": None, "r3_buzzer_locked": False,
+            })
+            self.json_response({"status": "ok"})
+            return
+
+        if "ban_check" in params:
+            email = params.get("email", [""])[0].lower().strip()
+            is_finalist   = email in finalist_emails
+            is_banned     = email in banned_emails and not is_finalist
+            in_finals     = finals_mode and email not in [player_emails.get(p,"").lower().strip() for p in finals_players]
+            self.json_response({
+                "banned":       is_banned,
+                "finalist":     is_finalist,
+                "finals_mode":  finals_mode,
+                "in_finals":    email in [player_emails.get(p,"").lower().strip() for p in finals_players] if finals_mode else False,
+            })
+            return
+
+        if "register_email" in params:
+            email  = params.get("email", [""])[0].lower().strip()
+            pname  = params.get("pname", [""])[0]
+            if email and pname:
+                player_emails[pname] = email
+                save_persistent_state()
+            self.json_response({"status": "ok"})
+            return
+
+        if "reset_ban" in params:
+            banned_emails.clear()
+            finalist_emails.clear()
+            save_persistent_state()
+            self.json_response({"status": "ok"})
+            return
+
+        if "week_info" in params:
+            self.json_response({
+                "week_count":    len(week_results),
+                "week_results":  week_results,
+                "finals_mode":   finals_mode,
+                "finals_players": finals_players,
+            })
+            return
+
+        active_user = params.get("keepalive", [None])[0]
+        if active_user is not None:
+            if active_user in online_players:
+                online_players[active_user] = time.time()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+
+        new_user = params.get("name", [None])[0]
+        if new_user:
+            if new_user not in online_players and len(online_players) < 4:
+                online_players[new_user] = time.time()
+
+        if not game_started:
+            now = time.time()
+            for name in list(online_players.keys()):
+                if now - online_players[name] > 20:
+                    del online_players[name]
+
+        num_players       = len(online_players)
+        player_list_html  = "".join([f"<li>🐤 {n}</li>" for n in online_players])
+        btn_start_display = "block" if num_players >= 4 else "none"
+
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(build_html(
+            num_players, player_list_html, btn_start_display, TIME_PER_QUESTION
+        ).encode("utf-8"))
+
+
+# ─────────────────────────────────────────
+#  HTML
+# ─────────────────────────────────────────
+def build_html(num_players, player_list_html, btn_start_display, TL):
+    return f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Đường Lên Đỉnh Olympia</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{overflow:hidden;background:linear-gradient(to bottom,#87CEEB,#E0F7FA);font-family:'Segoe UI',sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;width:100vw;}}
+.cloud-container{{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none;}}
+.cloud{{position:absolute;background:#fff;border-radius:50px;animation:moveClouds linear infinite;opacity:.85;}}
+.cloud::before,.cloud::after{{content:'';position:absolute;background:#fff;border-radius:50%;}}
+.c1{{width:130px;height:48px;top:12%;animation-duration:38s;}}
+.c1::before{{width:70px;height:70px;top:-35px;left:20px;}}
+.c1::after{{width:50px;height:50px;top:-22px;left:65px;}}
+.c2{{width:200px;height:65px;top:38%;animation-duration:27s;animation-delay:-10s;}}
+.c2::before{{width:90px;height:90px;top:-45px;left:30px;}}
+.c2::after{{width:65px;height:65px;top:-28px;left:100px;}}
+.c3{{width:100px;height:38px;top:65%;animation-duration:45s;animation-delay:-20s;}}
+@keyframes moveClouds{{0%{{left:110%;}}100%{{left:-25%;}}}}
+.main-box{{position:relative;z-index:10;background:white;padding:40px 35px;border-radius:25px;box-shadow:0 12px 35px rgba(0,0,0,.12);width:420px;text-align:center;}}
+h2{{color:#2c3e50;margin-bottom:24px;font-size:1.4rem;}}
+h1{{color:#27ae60;margin-bottom:18px;font-size:1.6rem;}}
+.input-group{{position:relative;display:flex;align-items:center;margin-bottom:16px;}}
+input[type=text],input[type=password]{{width:100%;padding:14px 45px 14px 16px;border:1.5px solid #ddd;border-radius:12px;font-size:15px;outline:none;transition:border .2s;}}
+input:focus{{border-color:#5db9e0;}}
+.eye-btn{{position:absolute;right:14px;cursor:pointer;font-size:20px;user-select:none;}}
+.btn{{width:100%;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:bold;cursor:pointer;transition:transform .2s,opacity .2s;margin-top:8px;}}
+.btn:hover{{transform:scale(1.03);opacity:.92;}}
+.btn-login{{background:#5db9e0;color:white;}}
+.btn-start{{background:#2ecc71;color:white;display:{btn_start_display};}}
+.btn-logout{{background:#ff7675;color:white;margin-top:20px;}}
+#admin-panel{{margin-top:22px;text-align:left;background:#f4f9ff;padding:16px;border-radius:14px;border:1.5px dashed #87CEEB;}}
+.panel-header{{display:flex;justify-content:space-between;font-weight:bold;margin-bottom:10px;color:#2c3e50;}}
+.panel-header span:first-child{{color:#007bff;}}
+#admin-panel ul{{list-style:none;padding:0;margin-bottom:8px;}}
+#admin-panel li{{padding:6px 0;border-bottom:1px solid #e0eaf5;font-size:15px;}}
+#waitText{{color:#888;margin-top:18px;font-size:15px;}}
+</style>
+</head>
+<body>
+<div class="cloud-container"><div class="cloud c1"></div><div class="cloud c2"></div><div class="cloud c3"></div></div>
+<audio id="buzzerSfx" src="/kd_chung.mp3" preload="auto"></audio>
+
+<div id="login-screen" class="main-box">
+  <h2>🔒 CỔNG TRỜI OLYMPIA</h2>
+  <div class="input-group"><input type="text" id="emailInput" placeholder="Email của bạn"></div>
+  <div class="input-group">
+    <input type="password" id="passInput" placeholder="Nhập mật mã...">
+    <span class="eye-btn" id="toggleIcon" onclick="togglePass()">&#128065;</span>
+  </div>
+  <button class="btn btn-login" onclick="checkLogin()">VÀO LOBBY</button>
+  <p id="loginMsg" style="display:none;margin-top:14px;color:#e74c3c;font-weight:bold;font-size:.95rem;"></p>
+</div>
+
+<div id="lobby-screen" class="main-box" style="display:none;">
+  <h1>✍️ LOBBY OLYMPIA</h1>
+  <p id="welcomeMsg" style="font-weight:bold;color:#2c3e50;"></p>
+  <div id="admin-panel" style="display:none;">
+    <div class="panel-header"><span>Người chơi Online ✍️</span><span>{num_players}/4</span></div>
+    <ul>{player_list_html}</ul>
+    <button class="btn btn-start" onclick="startGame()">🚀 BẮT ĐẦU CHƠI</button>
+    <button class="btn" onclick="resetGame()" style="background:#c0392b;color:white;margin-top:6px;">🔄 Reset game mới (giữ lịch sử tuần)</button>
+    <button class="btn" onclick="resetAll()" style="background:#6c3483;color:white;margin-top:6px;">♻️ Reset toàn bộ (xoá lịch sử tuần)</button>
+    <div id="weekInfo" style="margin-top:10px;font-size:.85rem;color:#555;"></div>
+  </div>
+  <p id="waitText" style="display:none;">⏳ Đang chờ Admin bắt đầu...</p>
+  <button class="btn btn-logout" onclick="logout()">THOÁT</button>
+</div>
+
+<script>
+const TL={TL};
+let pollInterval=null, timerInterval=null;
+let lastPhase=null, lastR1=-1, lastR2=-1, lastR3Pieces="", lastR3Piece=-1, lastPausedKey="";
+let remaining=TL, submitted=false, buzzered=false;
+
+/* ── audio ── */
+function playBuzzer(){{
+  const a=new Audio("/kd_chung.mp3");
+  a.play().catch(()=>{{}});
+}}
+
+/* ── login ── */
+function togglePass(){{
+  const i=document.getElementById("passInput"),ic=document.getElementById("toggleIcon");
+  i.type=i.type==="password"?"text":"password";
+  ic.innerText=i.type==="password"?"👁":"🔓";
+}}
+function checkLogin(){{
+  const email=document.getElementById("emailInput").value.trim();
+  const pass=document.getElementById("passInput").value;
+  if(!email.includes("@")||!email.includes(".com")){{alert("Email không hợp lệ!");return;}}
+  if(pass!=="McChiCken"){{alert("Mật mã không đúng!");return;}}
+  if(email==="hoc49332@gmail.com"){{
+    sessionStorage.setItem("role","admin");sessionStorage.setItem("uName","Admin_Olympia");
+    showLobby("Chủ nhân Olympia 👑",true);
+  }}else{{
+    fetch("/?ban_check=1&email="+encodeURIComponent(email))
+      .then(r=>r.json())
+      .then(data=>{{
+        const msg=document.getElementById("loginMsg");
+        // Đã vào chung kết (hạng 1)
+        if(data.finalist){{
+          if(msg){{msg.style.display="block";msg.style.color="#f1c40f";msg.innerText="👑 Bạn đã vào chung kết, không cần thi tuần!";}}
+          return;
+        }}
+        // Bị loại (hạng 4)
+        if(data.banned){{
+          if(msg){{msg.style.display="block";msg.style.color="#e74c3c";msg.innerText="😥 Bạn đã bị loại!";}}
+          return;
+        }}
+        // Chung kết đang diễn ra nhưng không phải trong danh sách
+        if(data.finals_mode&&!data.in_finals){{
+          if(msg){{msg.style.display="block";msg.style.color="#aad4f5";msg.innerText="😥 Đợi một chút, chung kết đang diễn ra!";}}
+          return;
+        }}
+        const savedName=localStorage.getItem("name_"+email);
+        if(savedName){{
+          sessionStorage.setItem("role","player");sessionStorage.setItem("uName",savedName);
+          fetch("/?register_email=1&email="+encodeURIComponent(email)+"&pname="+encodeURIComponent(savedName));
+          fetch("/?name="+encodeURIComponent(savedName)).then(()=>showLobby(savedName,false));
+        }}else{{
+          const name=prompt("Tên thí sinh của bạn?");
+          if(!name||!name.trim())return;
+          localStorage.setItem("name_"+email,name.trim());
+          sessionStorage.setItem("role","player");sessionStorage.setItem("uName",name.trim());
+          fetch("/?register_email=1&email="+encodeURIComponent(email)+"&pname="+encodeURIComponent(name.trim()));
+          fetch("/?name="+encodeURIComponent(name.trim())).then(()=>showLobby(name.trim(),false));
+        }}
+      }}).catch(()=>alert("Lỗi kết nối!"));
+  }}
+}}
+function showLobby(title,isAdmin){{
+  document.getElementById("login-screen").style.display="none";
+  document.getElementById("lobby-screen").style.display="block";
+  document.getElementById("welcomeMsg").innerText=title;
+  const myName=sessionStorage.getItem("uName");
+  if(isAdmin){{
+    document.getElementById("admin-panel").style.display="block";
+    setInterval(()=>fetch("/?keepalive="+encodeURIComponent(myName)),4000);
+    loadWeekInfo();
+    setInterval(()=>{{
+      fetch("/?status=1").then(r=>r.json()).then(d=>{{
+        if(d.phase!=="lobby"){{
+          if(pollInterval)clearInterval(pollInterval);
+          pollInterval=setInterval(()=>fetch("/?status=1").then(r=>r.json()).then(route).catch(()=>{{}}),500);
+          route(d);
+        }}else{{location.reload();}}
+      }}).catch(()=>{{}});
+    }},7000);
+  }}else{{
+    document.getElementById("waitText").style.display="block";
+    pollInterval=setInterval(()=>{{
+      fetch("/?keepalive="+encodeURIComponent(myName));
+      fetch("/?status=1").then(r=>r.json()).then(d=>{{if(d.phase!=="lobby")route(d);}}).catch(()=>{{}});
+    }},1000);
+  }}
+}}
+function startGame(){{
+  fetch("/?start_game=1").then(r=>r.json()).then(d=>{{
+    route({{phase:"start",player_order:d.players,scores:{{}},r1_idx:0,r2_idx:0,current_answer:{{}},buzzer_player:null,buzzer_locked:false}});
+    if(pollInterval)clearInterval(pollInterval);
+    pollInterval=setInterval(()=>fetch("/?status=1").then(r=>r.json()).then(route).catch(()=>{{}}),500);
+  }});
+}}
+function logout(){{sessionStorage.clear();window.location.href="/";}}
+function resetBan(){{
+  fetch("/?reset_ban=1").then(()=>{{alert("✅ Đã reset danh sách bị loại!");location.reload();}});
+}}
+function resetGame(){{
+  if(!confirm("Reset game tuần mới? Lịch sử các tuần vẫn được giữ."))return;
+  fetch("/?reset_game=1").then(()=>{{alert("✅ Đã reset game tuần mới!");location.reload();}});
+}}
+function resetAll(){{
+  if(!confirm("⚠️ Xoá TOÀN BỘ lịch sử tuần, ban list, chung kết? Không thể hoàn tác!"))return;
+  fetch("/?reset_all=1").then(()=>{{alert("✅ Đã reset toàn bộ!");location.reload();}});
+}}
+function loadWeekInfo(){{
+  fetch("/?week_info=1").then(r=>r.json()).then(data=>{{
+    const el=document.getElementById("weekInfo");
+    if(!el)return;
+    let html="<b>📅 Lịch sử tuần ("+data.week_count+"/3):</b><br>";
+    data.week_results.forEach((w,i)=>{{
+      html+=`Tuần ${{i+1}}: 🥇${{w.winner}}(${{w.winner_score}}đ) 🥈${{w.runner_up}}(${{w.runner_up_score}}đ) 🚫${{w.loser}}<br>`;
+    }});
+    if(data.finals_mode){{
+      html+="<br><b style='color:#e74c3c'>🏆 CHUNG KẾT: "+data.finals_players.join(", ")+"</b>";
+    }}
+    el.innerHTML=html;
+  }}).catch(()=>{{}});
+}}
+function route(d){{
+  const isAdmin=sessionStorage.getItem("role")==="admin";
+  const myName=sessionStorage.getItem("uName");
+  const ph=d.phase;
+
+  if(ph==="start"){{
+    if(lastPhase!=="start"){{lastPhase="start";showStart(d,myName);}}
+    return;
+  }}
+  if(ph==="r1_question"){{
+    if(lastPhase!==ph||lastR1!==d.r1_idx){{
+      lastPhase=ph;lastR1=d.r1_idx;submitted=false;
+      showR1Question(d,isAdmin,myName);
+    }}else{{
+      tickTimer(d.remaining);
+    }}
+    return;
+  }}
+  if(ph==="r1_result"){{
+    if(lastPhase!==ph||lastR1!==d.r1_idx){{lastPhase=ph;lastR1=d.r1_idx;showR1Result(d,isAdmin,myName);}}
+    return;
+  }}
+  if(ph==="r2_start"){{
+    if(lastPhase!==ph){{lastPhase=ph;showR2Start(d,myName,isAdmin);}}
+    return;
+  }}
+  if(ph==="r2_question"){{
+    if(lastPhase!==ph||lastR2!==d.r2_idx){{
+      lastPhase=ph;lastR2=d.r2_idx;buzzered=false;submitted=false;
+      showR2Question(d,isAdmin,myName);
+    }}
+    return;
+  }}
+  if(ph==="r2_buzzer_wait"){{
+    if(lastPhase!==ph){{lastPhase=ph;onBuzzerWait(d,isAdmin,myName);}}
+    return;
+  }}
+  if(ph==="r2_answer_wait"){{
+    if(lastPhase!==ph){{lastPhase=ph;submitted=false;onAnswerWait(d,isAdmin,myName);}}
+    else{{tickTimer(d.remaining);}}
+    return;
+  }}
+  if(ph==="r2_result"){{
+    if(lastPhase!==ph||lastR2!==d.r2_idx){{lastPhase=ph;lastR2=d.r2_idx;showR2Result(d,isAdmin,myName);}}
+    return;
+  }}
+  if(ph==="finished"){{if(lastPhase!==ph){{lastPhase=ph;showFinished(d);}}return;}}
+  // Vòng 3
+  if(ph==="r3_start"){{if(lastPhase!==ph){{lastPhase=ph;showR3Start(d,myName,isAdmin);}}return;}}
+  if(ph==="r3_choose"){{
+    if(lastPhase!==ph||JSON.stringify(d.r3_pieces)!==lastR3Pieces){{
+      lastPhase=ph;lastR3Pieces=JSON.stringify(d.r3_pieces);
+      showR3Choose(d,isAdmin,myName);
+    }}
+    return;
+  }}
+  if(ph==="r3_answering"){{
+    if(lastPhase!==ph||lastR3Piece!==d.r3_cur_piece){{
+      lastPhase=ph;lastR3Piece=d.r3_cur_piece;
+      showR3Answering(d,isAdmin,myName);
+    }}else{{tickTimer(d.remaining);}}
+    return;
+  }}
+  if(ph==="r3_result"){{
+    if(lastPhase!==ph||lastR3Piece!==d.r3_cur_piece){{lastPhase=ph;lastR3Piece=d.r3_cur_piece;showR3Result(d,isAdmin,myName);}}
+    return;
+  }}
+  if(ph==="r3_keyword_correct"){{if(lastPhase!==ph){{lastPhase=ph;showR3KeywordCorrect(d,isAdmin,myName);}}return;}}
+  if(ph==="r3_final_wait"){{
+    if(lastPhase!==ph){{lastPhase=ph;showR3FinalWait(d,isAdmin,myName);}}
+    else{{tickTimer(d.remaining);}}
+    return;
+  }}
+  if(ph==="r3_final_buzzer"){{if(lastPhase!==ph){{lastPhase=ph;onR3FinalBuzzer(d,isAdmin,myName);}}return;}}
+  if(ph==="r3_final_answer"){{
+    if(lastPhase!==ph){{lastPhase=ph;showR3FinalAnswer(d,isAdmin,myName);}}
+    else{{tickTimer(d.remaining);}}
+    return;
+  }}
+  if(ph==="r3_final_result"){{if(lastPhase!==ph){{lastPhase=ph;showR3FinalResult(d,isAdmin,myName);}}return;}}
+}}
+
+/* ── Màn hình start ── */
+function showStart(d,myName){{
+  stopTimer();
+  const isAdmin=sessionStorage.getItem("role")==="admin";
+  setBody(`
+    <style>
+      .gs{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:grid;grid-template-columns:1fr 1fr;align-items:center;font-family:'Segoe UI',sans-serif;color:white;}}
+      .lp{{display:flex;flex-direction:column;gap:32px;padding-left:80px;}}
+      .pname{{font-size:2.2rem;font-weight:bold;color:#aad4f5;display:flex;justify-content:space-between;padding-right:40px;}}
+      .pname.hl{{color:#f1c40f;animation:blink 1s ease-in-out infinite;}}
+      @keyframes blink{{0%,100%{{opacity:1;}}50%{{opacity:.2;}}}}
+      .rp{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding-right:60px;}}
+      .trophy{{font-size:5rem;}}
+      .title{{color:#f1c40f;font-size:3rem;font-weight:900;text-align:center;text-shadow:0 0 25px rgba(241,196,15,.7);}}
+      .sub{{color:#aad4f5;font-size:1.1rem;text-align:center;animation:pulse 1.5s ease-in-out infinite;}}
+      @keyframes pulse{{0%,100%{{opacity:1;}}50%{{opacity:.4;}}}}
+      .gbtn{{padding:14px 32px;background:#2ecc71;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;}}
+    </style>
+    <div class="gs">
+      <div class="lp">
+        ${{d.player_order.map(n=>`<div class="pname ${{n===myName?"hl":""}}">${{n}}<span>${{d.scores[n]||0}}đ</span></div>`).join("")}}
+      </div>
+      <div class="rp">
+        <div class="trophy">🏆</div>
+        <div class="title">OLYMPIA BẮT ĐẦU!</div>
+        <div class="sub">Chúc các thí sinh thi đấu thật tốt...</div>
+        ${{isAdmin?'<button class="gbtn" onclick="beginR1()">▶ BẮT ĐẦU VÒNG 1</button>':''}}
+      </div>
+    </div>`);
+}}
+function beginR1(){{fetch("/?begin_r1=1");lastPhase=null;lastR1=-1;}}
+
+/* ══════════════ VÒNG 1 ══════════════ */
+function showR1Question(d,isAdmin,myName){{
+  stopTimer();remaining=d.remaining!==undefined?d.remaining:TL;
+  const players=d.player_order, scores=d.scores||{{}};
+  const cur=d.current_player;
+  const qNum=d.r1_idx+1;
+  const isMine=myName===cur&&!isAdmin;
+
+  const headerCols=players.map(n=>{{
+    const active=n===cur;
+    return `<th id="th_${{safeId(n)}}" class="${{active?"th-active":""}}">${{n}}<br><span class="sc">${{scores[n]||0}}đ</span></th>`;
+  }}).join("");
+
+  const ansArea=isMine
+    ?`<div style="display:flex;" id="inputWrap">
+        <input id="ansInput" type="text" placeholder="Ghi câu trả lời ở đây" autofocus
+          style="flex:1;padding:16px 20px;font-size:1.05rem;border:none;outline:none;background:white;color:#222;">
+        <button onclick="submitR1()"
+          style="padding:16px 28px;background:#f1c40f;color:#1a1a2e;border:none;font-size:1rem;font-weight:900;cursor:pointer;">Submit</button>
+      </div>`
+    :(isAdmin
+      ?`<div style="padding:16px 20px;background:white;color:#555;font-style:italic;">Admin – <b style="color:#27ae60">${{cur}}</b> đang trả lời...</div>`
+      :`<div style="padding:16px 20px;background:white;color:#888;font-style:italic;">Chờ <b>${{cur}}</b> trả lời...</div>`);
+
+  setBody(`
+    <style>
+      ${{gameCSS()}}
+      .th-active{{background:#27ae60!important;animation:thblink .7s ease-in-out infinite;}}
+      @keyframes thblink{{0%,100%{{background:#27ae60;}}50%{{background:#1e8449;}}}}
+    </style>
+    <div class="lp" id="leftPanel"></div>
+    <div class="rp">
+      <div class="q-label">Vòng 1 – Câu ${{qNum}}/4 &nbsp;|&nbsp; Thí sinh: <b style="color:#2ecc71">${{cur}}</b></div>
+      <table class="oly-table">
+        <thead><tr id="headerRow">${{headerCols}}</tr></thead>
+        <tbody>
+          <tr class="q-row"><td colspan="4">${{d.question}}</td></tr>
+          <tr class="timer-row"><td colspan="4"><div id="timerBar"></div></td></tr>
+          <tr class="ans-row"><td colspan="4" id="ansArea">${{ansArea}}</td></tr>
+        </tbody>
+      </table>
+    </div>`);
+
+  renderLeft(players,myName,scores,cur,{{}});
+  startTimer();
+  const inp=document.getElementById("ansInput");
+  if(inp)inp.addEventListener("keydown",e=>{{if(e.key==="Enter")submitR1();}});
+}}
+
+function submitR1(){{
+  if(submitted)return;
+  const inp=document.getElementById("ansInput");
+  if(!inp||!inp.value.trim())return;
+  submitted=true;
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?submit_r1=1&player="+encodeURIComponent(myName)+"&answer="+encodeURIComponent(inp.value.trim()));
+  const wrap=document.getElementById("inputWrap");
+  if(wrap)wrap.innerHTML=`<div style="padding:16px 20px;color:#27ae60;font-weight:bold;">✅ Đã nộp! Đang chờ kết quả...</div>`;
+}}
+
+function showR1Result(d,isAdmin,myName){{
+  stopTimer();
+  const players=d.player_order, scores=d.scores||{{}};
+  const cur=d.current_player;
+  const a=d.current_answer[cur]||{{answer:"(Hết giờ)",correct:false}};
+  const color=a.correct?"#2ecc71":"#e74c3c";
+
+  const headerCols=players.map(n=>
+    `<th class="${{n===cur?"th-result":""}}">${{n}}<br><span class="sc">${{scores[n]||0}}đ</span></th>`
+  ).join("");
+
+  const nextBtn=isAdmin
+    ?`<div style="text-align:center;margin-top:18px;">
+        <button onclick="nextR1()" style="padding:13px 40px;background:#3498db;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;">TIẾP THEO ▶</button>
+      </div>`
+    :`<p style="color:#aad4f5;margin-top:14px;text-align:center;font-style:italic;">⏳ Chờ Admin chuyển câu...</p>`;
+
+  setBody(`
+    <style>
+      ${{gameCSS()}}
+      .th-result{{background:#27ae60!important;}}
+    </style>
+    <div class="lp">
+      ${{players.map(n=>`<div class="pname ${{n===myName?"hl":""}}">${{n}}<span class="pscore">${{scores[n]||0}}đ</span></div>`).join("")}}
+    </div>
+    <div class="rp">
+      <div class="q-label">Vòng 1 – Câu ${{d.r1_idx+1}}/4 – Kết quả</div>
+      <table class="oly-table">
+        <thead><tr>${{headerCols}}</tr></thead>
+        <tbody>
+          <tr class="q-row"><td colspan="4">${{d.question}}</td></tr>
+          <tr class="timer-row"><td colspan="4"></td></tr>
+          <tr><td colspan="4" style="padding:16px 20px;background:white;text-align:center;font-weight:bold;font-size:1.1rem;color:${{color}};">
+            ${{a.correct?"✅":"❌"}} <b>${{cur}}</b>: ${{a.answer}}
+          </td></tr>
+        </tbody>
+      </table>
+      ${{nextBtn}}
+    </div>`);
+}}
+function nextR1(){{fetch("/?next_r1=1");lastPhase=null;}}
+
+/* ══════════════ CHUYỂN VÒNG 2 ══════════════ */
+function showR2Start(d,myName,isAdmin){{
+  stopTimer();
+  setBody(`
+    <style>
+      .gs{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;font-family:'Segoe UI',sans-serif;color:white;}}
+      .title{{color:#f1c40f;font-size:3rem;font-weight:900;text-shadow:0 0 25px rgba(241,196,15,.7);text-align:center;}}
+      .sub{{color:#aad4f5;font-size:1.2rem;text-align:center;animation:pulse 1.5s ease-in-out infinite;}}
+      @keyframes pulse{{0%,100%{{opacity:1;}}50%{{opacity:.4;}}}}
+      .scores{{display:flex;gap:32px;margin-top:8px;}}
+      .scard{{background:rgba(255,255,255,.08);border-radius:14px;padding:16px 28px;text-align:center;}}
+      .sname{{font-size:1rem;color:#aad4f5;margin-bottom:4px;}}
+      .sval{{font-size:1.6rem;font-weight:900;color:#f1c40f;}}
+      .gbtn{{padding:14px 40px;background:#2ecc71;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;margin-top:8px;}}
+    </style>
+    <div class="gs">
+      <div class="title">🔔 VÒNG 2 – BẤM CHUÔNG</div>
+      <div class="sub">6 câu hỏi chung – ai biết bấm chuông trước!</div>
+      <div class="scores">
+        ${{d.player_order.map(n=>`<div class="scard"><div class="sname">${{n}}</div><div class="sval">${{d.scores[n]||0}}đ</div></div>`).join("")}}
+      </div>
+      ${{isAdmin?'<button class="gbtn" onclick="beginR2()">▶ BẮT ĐẦU VÒNG 2</button>':''}}
+    </div>`);
+}}
+function beginR2(){{fetch("/?begin_r2=1");lastPhase=null;lastR2=-1;}}
+
+/* ══════════════ VÒNG 2 ══════════════ */
+function showR2Question(d,isAdmin,myName){{
+  stopTimer();
+  const players=d.player_order, scores=d.scores||{{}};
+  const qNum=d.r2_idx+1;
+
+  const headerCols=players.map(n=>
+    `<th id="th_${{safeId(n)}}">${{n}}<br><span class="sc">${{scores[n]||0}}đ</span></th>`
+  ).join("");
+
+  const bottomArea=isAdmin
+    ?`<div style="padding:16px 20px;background:white;color:#888;font-style:italic;text-align:center;">Chờ thí sinh bấm chuông...</div>`
+    :`<div style="padding:14px;text-align:center;background:white;">
+        <button id="buzzerBtn" onclick="pressBuzzer()"
+          style="padding:16px 48px;background:#e74c3c;color:white;border:none;border-radius:50px;font-size:1.2rem;font-weight:900;cursor:pointer;box-shadow:0 4px 15px rgba(231,76,60,.5);">
+          🔔 CHUÔNG
+        </button>
+      </div>`;
+
+  setBody(`
+    <style>${{gameCSS()}}</style>
+    <div class="lp" id="leftPanel"></div>
+    <div class="rp">
+      <div class="q-label">Vòng 2 – Câu ${{qNum}}/6</div>
+      <table class="oly-table">
+        <thead><tr id="headerRow">${{headerCols}}</tr></thead>
+        <tbody>
+          <tr class="q-row"><td colspan="4">${{d.question}}</td></tr>
+          <tr class="timer-row"><td colspan="4"><div id="timerBar"></div></td></tr>
+          <tr class="ans-row"><td colspan="4" id="ansArea">${{bottomArea}}</td></tr>
+          <tr class="status-row"><td colspan="4" id="statusRow">Đang chờ thí sinh bấm chuông...</td></tr>
+        </tbody>
+      </table>
+    </div>`);
+  renderLeft(players,myName,scores,null,{{}});
+}}
+
+function pressBuzzer(){{
+  if(buzzered)return;
+  buzzered=true;
+  playBuzzer();
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?buzzer=1&player="+encodeURIComponent(myName));
+  const btn=document.getElementById("buzzerBtn");
+  if(btn){{btn.style.background="#c0392b";btn.innerText="⏳ Chờ Admin...";btn.disabled=true;}}
+}}
+
+function onBuzzerWait(d,isAdmin,myName){{
+  const buzzer=d.buzzer_player;
+  d.player_order.forEach(n=>{{
+    const el=document.getElementById("th_"+safeId(n));
+    if(el){{
+      if(n===buzzer){{el.classList.add("th-buzzer");}}
+      else{{el.classList.remove("th-buzzer");}}
+    }}
+  }});
+  const s=document.getElementById("statusRow");
+  if(s)s.innerHTML=isAdmin
+    ?`<b style="color:#f1c40f">${{buzzer}}</b> đã bấm chuông! &nbsp;
+      <button onclick="adminOK()" style="padding:8px 24px;background:#2ecc71;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer;">✅ OK</button>`
+    :(myName===buzzer
+      ?`Bạn đã bấm chuông! Chờ Admin cho phép...`
+      :`<b style="color:#f1c40f">${{buzzer}}</b> đã bấm trước!`);
+  const btn=document.getElementById("buzzerBtn");
+  if(btn&&myName!==buzzer){{btn.disabled=true;btn.style.opacity=".35";btn.style.cursor="not-allowed";}}
+}}
+function adminOK(){{fetch("/?admin_ok=1");lastPhase=null;}}
+
+function onAnswerWait(d,isAdmin,myName){{
+  remaining=d.remaining!==undefined?d.remaining:TL;
+  const buzzer=d.buzzer_player;
+  const ansArea=document.getElementById("ansArea");
+  if(ansArea){{
+    if(myName===buzzer&&!isAdmin){{
+      ansArea.innerHTML=`<div style="display:flex;" id="inputWrap">
+        <input id="ansInput" type="text" placeholder="Ghi câu trả lời ở đây" autofocus
+          style="flex:1;padding:16px 20px;font-size:1.05rem;border:none;outline:none;background:white;color:#222;">
+        <button onclick="submitR2()"
+          style="padding:16px 28px;background:#f1c40f;color:#1a1a2e;border:none;font-size:1rem;font-weight:900;cursor:pointer;">Submit</button>
+      </div>`;
+      const inp=document.getElementById("ansInput");
+      if(inp)inp.addEventListener("keydown",e=>{{if(e.key==="Enter")submitR2();}});
+    }}else{{
+      ansArea.innerHTML=`<div style="padding:16px 20px;background:white;color:#555;font-style:italic;">
+        <b style="color:#f1c40f">${{buzzer}}</b> đang trả lời...
+      </div>`;
+    }}
+  }}
+  startTimer();
+}}
+
+function submitR2(){{
+  if(submitted)return;
+  const inp=document.getElementById("ansInput");
+  if(!inp||!inp.value.trim())return;
+  submitted=true;
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?submit_r2=1&player="+encodeURIComponent(myName)+"&answer="+encodeURIComponent(inp.value.trim()));
+  const wrap=document.getElementById("inputWrap");
+  if(wrap)wrap.innerHTML=`<div style="padding:16px 20px;color:#27ae60;font-weight:bold;">✅ Đã nộp! Đang chờ kết quả...</div>`;
+}}
+
+function showR2Result(d,isAdmin,myName){{
+  stopTimer();
+  const players=d.player_order, scores=d.scores||{{}};
+  const buzzer=d.buzzer_player;
+  const a=d.current_answer[buzzer]||{{answer:"(Hết giờ)",correct:false}};
+  const color=a.correct?"#2ecc71":"#e74c3c";
+
+  const headerCols=players.map(n=>
+    `<th class="${{n===buzzer?"th-result":""}}">${{n}}<br><span class="sc">${{scores[n]||0}}đ</span></th>`
+  ).join("");
+
+  const nextBtn=isAdmin
+    ?`<div style="text-align:center;margin-top:18px;">
+        <button onclick="nextR2()" style="padding:13px 40px;background:#3498db;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;">TIẾP THEO ▶</button>
+      </div>`
+    :`<p style="color:#aad4f5;margin-top:14px;text-align:center;font-style:italic;">⏳ Chờ Admin chuyển câu...</p>`;
+
+  setBody(`
+    <style>
+      ${{gameCSS()}}
+      .th-result{{background:#27ae60!important;}}
+    </style>
+    <div class="lp">
+      ${{players.map(n=>`<div class="pname ${{n===myName?"hl":""}}">${{n}}<span class="pscore">${{scores[n]||0}}đ</span></div>`).join("")}}
+    </div>
+    <div class="rp">
+      <div class="q-label">Vòng 2 – Câu ${{d.r2_idx+1}}/6 – Kết quả</div>
+      <table class="oly-table">
+        <thead><tr>${{headerCols}}</tr></thead>
+        <tbody>
+          <tr class="q-row"><td colspan="4">${{d.question}}</td></tr>
+          <tr class="timer-row"><td colspan="4"></td></tr>
+          <tr><td colspan="4" style="padding:16px 20px;background:white;text-align:center;font-weight:bold;font-size:1.1rem;color:${{color}};">
+            ${{a.correct?"✅":"❌"}} <b>${{buzzer}}</b>: ${{a.answer}}
+          </td></tr>
+        </tbody>
+      </table>
+      ${{nextBtn}}
+    </div>`);
+}}
+function nextR2(){{fetch("/?next_r2=1");lastPhase=null;}}
+
+/* ── Out Game ── */
+function outGame(){{
+  if(pollInterval){{clearInterval(pollInterval);pollInterval=null;}}
+  stopTimer();
+  lastPhase=null;lastR1=-1;lastR2=-1;
+  submitted=false;buzzered=false;
+  // Hiển thị lại lobby screen (không reload, không mất session)
+  document.body.style.cssText="overflow:hidden;background:linear-gradient(to bottom,#87CEEB,#E0F7FA);font-family:'Segoe UI',sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;width:100vw;";
+  document.body.innerHTML=`
+    <div class="cloud-container"><div class="cloud c1"></div><div class="cloud c2"></div><div class="cloud c3"></div></div>
+    <div id="lobby-screen" class="main-box">
+      <h1 style="color:#27ae60;margin-bottom:18px;font-size:1.6rem;">✍️ LOBBY OLYMPIA</h1>
+      <p id="welcomeMsg" style="font-weight:bold;color:#2c3e50;"></p>
+      <p id="waitText" style="color:#888;margin-top:18px;font-size:15px;">⏳ Đang chờ Admin bắt đầu game mới...</p>
+      <button onclick="sessionStorage.clear();location.reload();" style="width:100%;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:bold;cursor:pointer;background:#ff7675;color:white;margin-top:20px;">THOÁT</button>
+    </div>`;
+  const role=sessionStorage.getItem("role");
+  const uName=sessionStorage.getItem("uName");
+  const wm=document.getElementById("welcomeMsg");
+  if(wm)wm.innerText=role==="admin"?"Chủ nhân Olympia 👑":uName;
+  // Bắt đầu poll lại, chờ game mới
+  pollInterval=setInterval(()=>{{
+    fetch("/?keepalive="+encodeURIComponent(uName));
+    fetch("/?status=1").then(r=>r.json()).then(d=>{{
+      if(d.phase==="lobby"||d.phase==="start"||d.phase==="r1_question"||d.phase==="r2_start"||d.phase==="r2_question"||d.phase==="r3_start"||d.phase==="r3_choose"){{
+        // Game mới bắt đầu, route bình thường
+        if(pollInterval){{clearInterval(pollInterval);pollInterval=null;}}
+        pollInterval=setInterval(()=>fetch("/?status=1").then(r=>r.json()).then(route).catch(()=>{{}}),500);
+      }}
+    }}).catch(()=>{{}});
+  }},1500);
+}}
+
+
+/* ══════════════ VÒNG 3 ══════════════ */
+function showR3Start(d,myName,isAdmin){{
+  stopTimer();
+  setBody(`
+    <style>
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;font-family:'Segoe UI',sans-serif;color:white;}}
+      .title{{color:#f1c40f;font-size:2.8rem;font-weight:900;text-shadow:0 0 25px rgba(241,196,15,.7);text-align:center;}}
+      .sub{{color:#aad4f5;font-size:1.1rem;text-align:center;animation:pulse 1.5s ease-in-out infinite;}}
+      @keyframes pulse{{0%,100%{{opacity:1;}}50%{{opacity:.4;}}}}
+      .scores{{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;}}
+      .scard{{background:rgba(255,255,255,.08);border-radius:14px;padding:14px 24px;text-align:center;}}
+      .sname{{font-size:.9rem;color:#aad4f5;}}
+      .sval{{font-size:1.5rem;font-weight:900;color:#f1c40f;}}
+      .gbtn{{padding:14px 40px;background:#2ecc71;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;}}
+    </style>
+    <div class="title">🧩 VÒNG 3 – VƯỢT CHƯỚNG NGẠI VẬT</div>
+    <div class="sub">4 mảnh ghép – Ai đoán được từ khoá?</div>
+    <div class="scores">
+      ${{d.player_order.map(n=>`<div class="scard"><div class="sname">${{n}}</div><div class="sval">${{d.scores[n]||0}}đ</div></div>`).join("")}}
+    </div>
+    ${{isAdmin?'<button class="gbtn" onclick="beginR3()">▶ BẮT ĐẦU VÒNG 3</button>':''}}
+  `);
+}}
+function beginR3(){{fetch("/?begin_r3=1");lastPhase=null;}}
+
+function r3BoardHTML(pieces,scores,players,myName,curPlayer,eliminated,curPieceIdx=-1){{
+  // 4 mảnh ghép 2x2
+  // Vị trí clip ảnh: 4 mảnh = 2x2 (top-left, top-right, bot-left, bot-right)
+  const imgPos=[
+    "0% 0%","100% 0%","0% 100%","100% 100%"
+  ];
+  const pieceBtns=pieces.map((p,i)=>{{
+    if(p.locked&&p.correct){{
+      const pos=imgPos[i];
+      return `<div style="width:140px;height:140px;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.3);">
+        <img src="/dap3.jpg" style="width:280px;height:280px;object-fit:cover;object-position:${{pos}};display:block;margin-left:${{i%2===1?"-140px":"0"}};margin-top:${{i>=2?"-140px":"0"}};">
+      </div>`;
+    }}else if(p.locked&&!p.correct){{
+      return `<div style="width:140px;height:140px;background:#444;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:2.5rem;opacity:.5;box-shadow:0 4px 20px rgba(0,0,0,.3);">❌</div>`;
+    }}else if(p.picked){{
+      // Đang được trả lời – highlight vàng, không click được
+      return `<div style="width:140px;height:140px;background:#f39c12;border-radius:12px;display:flex;align-items:center;justify-content:center;
+               font-size:3rem;font-weight:900;color:white;cursor:default;
+               box-shadow:0 0 20px rgba(243,156,18,.6);outline:3px solid #f1c40f;">${{i+1}}</div>`;
+    }}else{{
+      return `<div onclick="r3Pick(${{i}})"
+        style="width:140px;height:140px;background:#3a7bd5;border-radius:12px;display:flex;align-items:center;justify-content:center;
+               font-size:3rem;font-weight:900;color:white;cursor:pointer;
+               box-shadow:0 4px 20px rgba(0,0,0,.3);transition:transform .15s;"
+        onmouseover="this.style.transform='scale(1.06)'"
+        onmouseout="this.style.transform='scale(1)'"
+      >${{i+1}}</div>`;
+    }}
+  }}).join("");
+
+  const scoreRow=players.map(n=>{{
+    const isElim=eliminated.includes(n);
+    const sc=scores&&scores[n]!==undefined?scores[n]:0;
+    const elimBg=isElim?"#c0392b":"#27ae60";
+    const elimOp=isElim?"0.5":"1";
+    return `<div style="padding:6px 14px;background:${{elimBg}};border-radius:8px;font-size:.85rem;font-weight:bold;color:white;opacity:${{elimOp}};">${{n}}: ${{sc}}đ${{isElim?" 🚫":""}}</div>`;
+  }}).join("");
+
+  const qRows=pieces.map((p,i)=>{{
+    // Chỉ hiện câu hỏi nếu đây là mảnh đang/đã được chọn
+    const isActive=(curPieceIdx===i);
+    const wasAnswered=p.locked;
+    const showQ=isActive||wasAnswered;
+    let qtext=showQ?(d_r3_questions?d_r3_questions[i]:"..."):"???";
+    let charBoxes="";
+    const cnt=(d_r3_char_counts&&d_r3_char_counts[i])||0;
+    const boxColor=showQ?"#aad4f5":"#555";
+    for(let c=0;c<cnt;c++)charBoxes+=`<span style="display:inline-block;width:22px;height:28px;border:2px solid ${{boxColor}};border-radius:4px;margin:1px;background:rgba(255,255,255,.08);"></span>`;
+    let rowStyle="background:rgba(255,255,255,.05)";
+    if(p.locked&&p.correct)rowStyle="background:rgba(39,174,96,.2)";
+    if(p.locked&&!p.correct)rowStyle="background:rgba(85,85,85,.3)";
+    if(isActive&&!p.locked)rowStyle="background:rgba(58,123,213,.25);outline:2px solid #f1c40f;";
+    const numBg=isActive?"#f1c40f":"#7b2fbe";
+    const numColor=isActive?"#1a1a2e":"white";
+    const textColor=showQ?"white":"#555";
+    const textStyle=showQ?"normal":"italic";
+    return `<tr style="${{rowStyle}}">
+      <td style="padding:10px 12px;text-align:center;"><div style="width:30px;height:30px;background:${{numBg}};border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:900;color:${{numColor}};font-size:.9rem;">${{i+1}}</div></td>
+      <td style="padding:10px 12px;color:${{textColor}};font-size:.9rem;line-height:1.4;font-style:${{textStyle}};">${{qtext}}</td>
+      <td style="padding:10px 12px;">${{charBoxes}}</td>
+    </tr>`;
+  }}).join("");
+
+  return {{pieceBtns, scoreRow, qRows}};
+}}
+
+let d_r3_questions=null, d_r3_char_counts=null;
+
+function showR3Choose(d,isAdmin,myName){{r3submitted=false;
+  stopTimer();
+  d_r3_questions  = d.r3_questions  || [];
+  d_r3_char_counts= d.r3_char_counts|| [];
+  const pieces=d.r3_pieces||[];
+  const scores=d.scores||{{}};
+  const players=d.player_order;
+  const eliminated=d.r3_eliminated||[];
+  const curPlayer=players[d.r3_turn_idx];
+  const isMeTurn=(myName===curPlayer&&!isAdmin);
+  const {{pieceBtns,scoreRow,qRows}}=r3BoardHTML(pieces,scores,players,myName,curPlayer,eliminated,typeof pieceIdx!=='undefined'?pieceIdx:-1);
+
+  setBody(`
+    <style>
+      *{{box-sizing:border-box;margin:0;padding:0;}}
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:grid;grid-template-columns:340px 1fr;font-family:'Segoe UI',sans-serif;color:white;overflow:hidden;}}
+      .lp{{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:18px;padding:30px;}}
+      .puzzle-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;}}
+      .rp{{display:flex;flex-direction:column;justify-content:space-between;padding:24px 36px 24px 10px;}}
+      .q-label{{color:#aad4f5;font-size:.85rem;margin-bottom:8px;}}
+      .qtable{{width:100%;border-collapse:collapse;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.3);}}
+      .qtable td{{border-bottom:1px solid rgba(255,255,255,.07);vertical-align:middle;}}
+      .qtable tr:last-child td{{border:none;}}
+      .keyword-bar{{background:rgba(255,255,255,.07);border-radius:12px;padding:14px 18px;margin-top:12px;}}
+      .kw-title{{color:#aad4f5;font-size:.8rem;margin-bottom:8px;}}.kw-boxes{{display:flex;gap:6px;}}
+      .kw-box{{width:44px;height:50px;background:rgba(255,255,255,.1);border:2px solid #3a7bd5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:900;color:#f1c40f;}}
+      .score-row{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}}
+      .turn-hint{{color:#f1c40f;font-size:.95rem;font-weight:bold;text-align:center;}}
+      .red-btn{{padding:10px 22px;background:#e74c3c;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:.9rem;}}
+    </style>
+    <div class="lp">
+      <div style="color:#f1c40f;font-weight:900;font-size:1.1rem;margin-bottom:4px;">🧩 CHỌN MẢNH GHÉP</div>
+      <div class="puzzle-grid">${{pieceBtns}}</div>
+      <div class="turn-hint">Lượt: <b>${{curPlayer}}</b></div>
+      <div class="score-row">${{scoreRow}}</div>
+      ${{(!isAdmin&&!eliminated.includes(myName))?'<button class="red-btn" onclick="r3KeywordPrompt()">🔑 Đoán từ khoá</button>':''}}
+    </div>
+    <div class="rp">
+      <div>
+        <div class="q-label">Vòng 3 – Vượt chướng ngại vật &nbsp;|&nbsp; Từ khoá có <b style="color:#f1c40f">${{ROUND3_KEYWORD_LEN}}</b> chữ cái</div>
+        <table class="qtable"><tbody>${{qRows}}</tbody></table>
+        <div class="keyword-bar">
+          <div class="kw-title">TỪ KHOÁ</div>
+          <div class="kw-boxes">${{"●".repeat(ROUND3_KEYWORD_LEN).split("").map(()=>'<div class="kw-box">?</div>').join("")}}</div>
+        </div>
+      </div>
+      ${{isMeTurn?'<div style="color:#2ecc71;font-weight:bold;font-size:1rem;text-align:center;margin-top:12px;">👆 Bấm vào mảnh ghép để chọn câu hỏi!</div>':'<div style="color:#aad4f5;font-size:.9rem;text-align:center;margin-top:12px;">Chờ <b style="color:#f1c40f">'+ curPlayer +'</b> chọn mảnh ghép...</div>'}}
+    </div>`);
+}}
+const ROUND3_KEYWORD_LEN=4;
+
+function r3Pick(idx){{
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?r3_pick=1&player="+encodeURIComponent(myName)+"&piece="+idx);
+}}
+
+function r3KeywordPrompt(){{
+  const myName=sessionStorage.getItem("uName");
+  // Gửi request dừng timer trước
+  fetch("/?r3_keyword_request=1&player="+encodeURIComponent(myName))
+    .then(()=>{{
+      const ans=prompt("Nhập từ khoá quan trọng:");
+      if(!ans||!ans.trim()){{
+        // Huỷ → không gửi gì, server tự tiếp tục khi client poll
+        return;
+      }}
+      fetch("/?r3_keyword=1&player="+encodeURIComponent(myName)+"&answer="+encodeURIComponent(ans.trim()));
+    }});
+}}
+
+function showR3Answering(d,isAdmin,myName){{
+  stopTimer();
+  // Nếu đang paused (ai đó bấm nút đỏ) → dừng timer ở giá trị hiện tại
+  remaining=d.remaining!==undefined?d.remaining:R3_TL;
+  d_r3_questions  = d.r3_questions  || d_r3_questions  || [];
+  d_r3_char_counts= d.r3_char_counts|| d_r3_char_counts|| [];
+  const pieces=d.r3_pieces||[];
+  const scores=d.scores||{{}};
+  const players=d.player_order;
+  const eliminated=d.r3_eliminated||[];
+  const curPlayer=players[d.r3_turn_idx];
+  const pieceIdx=d.r3_cur_piece;
+  const isMeTurn=(myName===curPlayer&&!isAdmin);
+  const {{pieceBtns,scoreRow,qRows}}=r3BoardHTML(pieces,scores,players,myName,curPlayer,eliminated,typeof pieceIdx!=='undefined'?pieceIdx:-1);
+
+  // Input area – TẤT CẢ thí sinh chưa bị loại đều nhập cùng lúc
+  const amIElim=eliminated.includes(myName);
+  const iAlreadySubmitted=d.r3_submitted&&d.r3_submitted[myName]!==undefined;
+  let inputArea="";
+  if(isAdmin){{
+    inputArea=`<div style="margin-top:10px;padding:14px;background:rgba(255,255,255,.07);border-radius:8px;color:#aad4f5;font-style:italic;">
+      Cả 4 thí sinh đang trả lời mảnh ${{pieceIdx+1}}...
+      <button onclick="r3Reveal()" style="margin-left:16px;padding:8px 20px;background:#e67e22;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer;">⏩ Reveal kết quả</button>
+    </div>`;
+  }}else if(amIElim){{
+    inputArea=`<div style="margin-top:10px;padding:14px;background:rgba(192,57,43,.15);border-radius:8px;color:#e74c3c;font-style:italic;">🚫 Bạn đã bị loại, không thể trả lời.</div>`;
+  }}else if(iAlreadySubmitted){{
+    inputArea=`<div style="margin-top:10px;padding:14px;color:#27ae60;font-weight:bold;">✅ Đã nộp! Chờ hết giờ để xem kết quả...</div>`;
+  }}else{{
+    inputArea=`<div style="display:flex;margin-top:10px;" id="r3InputWrap">
+      <input id="r3Ans" type="text" placeholder="Ghi từ trả lời ở đây" autofocus
+        style="flex:1;padding:14px 16px;font-size:1rem;border:none;outline:none;border-radius:8px 0 0 8px;color:#222;">
+      <button onclick="r3Submit()" style="padding:14px 22px;background:#f1c40f;color:#1a1a2e;border:none;font-weight:900;cursor:pointer;">Submit</button>
+      <button onclick="r3KeywordPrompt()" title="Đoán từ khoá" style="padding:14px 18px;background:#e74c3c;color:white;border:none;border-radius:0 8px 8px 0;font-weight:900;cursor:pointer;">🔑</button>
+    </div>`;
+  }}
+
+  setBody(`
+    <style>
+      *{{box-sizing:border-box;margin:0;padding:0;}}
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:grid;grid-template-columns:340px 1fr;font-family:'Segoe UI',sans-serif;color:white;overflow:hidden;}}
+      .lp{{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:18px;padding:30px;}}
+      .puzzle-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;}}
+      .rp{{display:flex;flex-direction:column;justify-content:space-between;padding:24px 36px 24px 10px;}}
+      .qtable{{width:100%;border-collapse:collapse;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.3);}}
+      .qtable td{{border-bottom:1px solid rgba(255,255,255,.07);vertical-align:middle;}}
+      .qtable tr:last-child td{{border:none;}}
+      .timer-bar{{height:8px;background:#e74c3c;border-radius:4px;margin-top:8px;position:relative;overflow:hidden;}}
+      #timerBar{{position:absolute;top:0;left:0;height:100%;background:#555;width:0%;transition:width .08s linear;}}
+      .keyword-bar{{background:rgba(255,255,255,.07);border-radius:12px;padding:12px 18px;margin-top:10px;}}
+      .kw-title{{color:#aad4f5;font-size:.8rem;margin-bottom:6px;}}.kw-boxes{{display:flex;gap:6px;}}
+      .kw-box{{width:44px;height:50px;background:rgba(255,255,255,.1);border:2px solid #3a7bd5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:900;color:#f1c40f;}}
+      .score-row{{display:flex;gap:8px;flex-wrap:wrap;}}
+      .highlight-piece{{outline:3px solid #f1c40f!important;}}
+    </style>
+    <div class="lp">
+      <div style="color:#f1c40f;font-weight:900;font-size:1rem;">🧩 MẢNH ${{pieceIdx+1}} ĐANG ĐƯỢC TRẢ LỜI</div>
+      <div class="puzzle-grid">${{pieceBtns}}</div>
+      <div class="score-row">${{scoreRow}}</div>
+    </div>
+    <div class="rp">
+      <div>
+        <div style="color:#aad4f5;font-size:.85rem;margin-bottom:8px;">Vòng 3 – Mảnh ${{pieceIdx+1}} | <b style="color:#f1c40f">${{curPlayer}}</b> đang trả lời</div>
+        <table class="qtable"><tbody>${{qRows}}</tbody></table>
+        <div class="timer-bar"><div id="timerBar"></div></div>
+        <div class="keyword-bar">
+          <div class="kw-title">TỪ KHOÁ</div>
+          <div class="kw-boxes">${{"●".repeat(ROUND3_KEYWORD_LEN).split("").map(()=>'<div class="kw-box">?</div>').join("")}}</div>
+        </div>
+        ${{inputArea}}
+      </div>
+    </div>`);
+
+  if(!d.r3_paused){{
+    startTimer();
+  }}else{{
+    // Timer dừng – hiện overlay ai đang trả lời từ khoá
+    const kp=d.r3_keyword_player;
+    const overlay=document.createElement("div");
+    overlay.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999;gap:16px;";
+    overlay.innerHTML=`<div style="color:#f1c40f;font-size:1.6rem;font-weight:900;">⏸ Timer tạm dừng</div>
+      <div style="color:white;font-size:1.1rem;"><b style="color:#f1c40f">${{kp}}</b> đang đoán từ khoá quan trọng...</div>`;
+    document.body.appendChild(overlay);
+  }}
+  const inp=document.getElementById("r3Ans");
+  if(inp)inp.addEventListener("keydown",e=>{{if(e.key==="Enter")r3Submit();}});
+}}
+const R3_TL=20;
+
+let r3submitted=false;
+function r3Submit(){{
+  if(r3submitted)return;
+  const inp=document.getElementById("r3Ans");
+  if(!inp){{alert("Không tìm thấy ô nhập!");return;}}
+  const val=inp.value.trim();
+  if(!val){{inp.focus();return;}}
+  r3submitted=true;
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?r3_submit=1&player="+encodeURIComponent(myName)+"&answer="+encodeURIComponent(val));
+  const wrap=document.getElementById("r3InputWrap");
+  if(wrap)wrap.innerHTML='<div style="padding:14px 16px;color:#27ae60;font-weight:bold;background:white;border-radius:8px;">✅ Đã nộp! Chờ hết giờ để xem kết quả...</div>';
+}}
+
+function r3Reveal(){{
+  fetch("/?r3_reveal=1");
+  lastPhase=null;
+}}
+
+function showR3Result(d,isAdmin,myName){{
+  stopTimer();
+  d_r3_questions  = d.r3_questions  || d_r3_questions  || [];
+  d_r3_char_counts= d.r3_char_counts|| d_r3_char_counts|| [];
+  const pieces=d.r3_pieces||[];
+  const scores=d.scores||{{}};
+  const players=d.player_order;
+  const eliminated=d.r3_eliminated||[];
+  const curPlayer=players[d.r3_turn_idx];
+  const pieceIdx=d.r3_cur_piece;
+  const {{pieceBtns,scoreRow,qRows}}=r3BoardHTML(pieces,scores,players,myName,curPlayer,eliminated,typeof pieceIdx!=='undefined'?pieceIdx:-1);
+
+  const nextBtn=isAdmin
+    ?`<button onclick="r3Next()" style="padding:12px 36px;background:#3498db;color:white;border:none;border-radius:10px;font-size:1rem;font-weight:bold;cursor:pointer;margin-top:12px;">TIẾP THEO ▶</button>`
+    :`<p style="color:#aad4f5;font-style:italic;margin-top:12px;">⏳ Chờ Admin...</p>`;
+
+  setBody(`
+    <style>
+      *{{box-sizing:border-box;margin:0;padding:0;}}
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:grid;grid-template-columns:340px 1fr;font-family:'Segoe UI',sans-serif;color:white;overflow:hidden;}}
+      .lp{{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:18px;padding:30px;}}
+      .puzzle-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;}}
+      .rp{{display:flex;flex-direction:column;justify-content:space-between;padding:24px 36px 24px 10px;}}
+      .qtable{{width:100%;border-collapse:collapse;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;}}
+      .qtable td{{border-bottom:1px solid rgba(255,255,255,.07);vertical-align:middle;}}
+      .qtable tr:last-child td{{border:none;}}
+      .score-row{{display:flex;gap:8px;flex-wrap:wrap;}}
+    </style>
+    <div class="lp">
+      <div style="color:#f1c40f;font-weight:900;font-size:1rem;">🧩 KẾT QUẢ MẢNH ${{pieceIdx+1}}</div>
+      <div class="puzzle-grid">${{pieceBtns}}</div>
+      <div class="score-row">${{scoreRow}}</div>
+    </div>
+    <div class="rp">
+      <div>
+        <div style="color:#aad4f5;font-size:.85rem;margin-bottom:8px;">Kết quả mảnh ${{pieceIdx+1}}</div>
+        <table class="qtable"><tbody>${{qRows}}</tbody></table>
+        <div style="margin-top:14px;border-radius:10px;overflow:hidden;">
+          ${{Object.entries(d.current_answer||{{}}).map(([name,info])=>{{
+            const c=info.correct;
+            return `<div style="padding:12px 18px;background:${{c?"rgba(39,174,96,.2)":"rgba(231,76,60,.15)"}};border-bottom:1px solid rgba(255,255,255,.06);font-size:1rem;font-weight:bold;color:${{c?"#2ecc71":"#e74c3c"}};">
+              ${{c?"✅":"❌"}} <b>${{name}}</b>: ${{info.answer}}
+            </div>`;
+          }}).join("")}}
+        </div>
+        ${{nextBtn}}
+      </div>
+    </div>`);
+}}
+function r3Next(){{fetch("/?r3_next=1");lastPhase=null;lastR3Piece=-1;r3submitted=false;}}
+
+function showR3KeywordCorrect(d,isAdmin,myName){{
+  stopTimer();
+  const player=Object.keys(d.current_answer||{{}})[0];
+  const ans=d.current_answer[player];
+  setBody(`
+    <style>
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#0f3460,#16213e,#1a1a2e);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;font-family:'Segoe UI',sans-serif;color:white;}}
+      .boom{{font-size:5rem;animation:spin 1s linear infinite;}}
+      @keyframes spin{{0%{{transform:rotate(0deg);}}100%{{transform:rotate(360deg);}}}}
+      .title{{color:#f1c40f;font-size:2.5rem;font-weight:900;text-align:center;text-shadow:0 0 30px rgba(241,196,15,.8);}}
+      .kw{{font-size:3rem;font-weight:900;color:#2ecc71;letter-spacing:8px;}}
+      .gbtn{{padding:14px 40px;background:#3498db;color:white;border:none;border-radius:12px;font-size:1rem;font-weight:bold;cursor:pointer;}}
+    </style>
+    <div class="boom">🎊</div>
+    <div class="title">🏆 <b>${{player}}</b> đã đoán đúng từ khoá!</div>
+    <div class="kw">NƯỚC</div>
+    <div style="color:#aad4f5;">+50 điểm</div>
+    ${{isAdmin?'<button class="gbtn" onclick="r3Finish()">✅ KẾT THÚC VÒNG 3</button>':''}}
+  `);
+}}
+function r3Finish(){{fetch("/?r3_finish=1");lastPhase=null;}}
+
+function showR3FinalWait(d,isAdmin,myName){{
+  stopTimer();
+  remaining=d.remaining!==undefined?d.remaining:30;
+  const eliminated=d.r3_eliminated||[];
+  const active=d.player_order.filter(p=>!eliminated.includes(p));
+  const scores=d.scores||{{}};
+
+  setBody(`
+    <style>
+      *{{box-sizing:border-box;margin:0;padding:0;}}
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;font-family:'Segoe UI',sans-serif;color:white;}}
+      .title{{color:#f1c40f;font-size:2rem;font-weight:900;text-align:center;}}
+      .timer-wrap{{width:400px;height:12px;background:#333;border-radius:6px;overflow:hidden;}}
+      #timerBar{{height:100%;background:#e74c3c;width:0%;transition:width .08s linear;}}
+      .scores{{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;}}
+      .scard{{background:rgba(255,255,255,.08);border-radius:12px;padding:14px 22px;text-align:center;}}
+      .sname{{font-size:.85rem;color:#aad4f5;}}
+      .sval{{font-size:1.4rem;font-weight:900;color:#f1c40f;}}
+      .buzz-btn{{padding:16px 48px;background:#e74c3c;color:white;border:none;border-radius:50px;font-size:1.2rem;font-weight:900;cursor:pointer;box-shadow:0 4px 15px rgba(231,76,60,.5);}}
+    </style>
+    <div class="title">🔔 30 GIÂY ĐOÁN TỪ KHOÁ!</div>
+    <div style="color:#aad4f5;">Từ khoá có <b style="color:#f1c40f">4</b> chữ cái</div>
+    <div class="timer-wrap"><div id="timerBar"></div></div>
+    <div class="scores">
+      ${{d.player_order.map(n=>{{
+        const elim=eliminated.includes(n);
+        const op=elim?".4":"1";
+        return '<div class="scard" style="opacity:'+op+'"><div class="sname">'+n+(elim?" 🚫":"")+'</div><div class="sval">'+(scores[n]||0)+'đ</div></div>';
+      }}).join("")}}
+    </div>
+    ${{(!isAdmin&&active.includes(myName))?'<button class="buzz-btn" onclick="r3FinalBuzzer()">🔔 CHUÔNG</button>':''}}`);
+
+  startTimer();
+}}
+
+function r3FinalBuzzer(){{
+  playBuzzer();
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?r3_buzzer=1&player="+encodeURIComponent(myName));
+  const btn=document.querySelector(".buzz-btn");
+  if(btn){{btn.disabled=true;btn.style.opacity=".4";btn.innerText="⏳ Chờ Admin...";}}
+}}
+
+function onR3FinalBuzzer(d,isAdmin,myName){{
+  const buzzer=d.r3_buzzer;
+  const statusEl=document.querySelector(".title");
+  if(statusEl)statusEl.innerHTML='🔔 <b style="color:#f1c40f">'+buzzer+'</b> đã bấm chuông!';
+  if(isAdmin){{
+    const wrap=document.querySelector(".timer-wrap");
+    if(wrap)wrap.insertAdjacentHTML("afterend",
+      '<button onclick="r3AdminOK()" style="padding:12px 30px;background:#2ecc71;color:white;border:none;border-radius:10px;font-weight:bold;cursor:pointer;">✅ OK cho trả lời</button>');
+  }}
+  const btn=document.querySelector(".buzz-btn");
+  if(btn&&myName!==buzzer){{btn.disabled=true;btn.style.opacity=".35";}}
+}}
+function r3AdminOK(){{fetch("/?r3_admin_ok=1");lastPhase=null;}}
+
+function showR3FinalAnswer(d,isAdmin,myName){{
+  stopTimer();
+  remaining=d.remaining!==undefined?d.remaining:20;
+  const buzzer=d.r3_buzzer;
+  const isMeBuzzer=(myName===buzzer&&!isAdmin);
+
+  setBody(`
+    <style>
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;font-family:'Segoe UI',sans-serif;color:white;}}
+      .title{{color:#f1c40f;font-size:1.8rem;font-weight:900;text-align:center;}}
+      .timer-wrap{{width:400px;height:12px;background:#333;border-radius:6px;overflow:hidden;}}
+      #timerBar{{height:100%;background:#e74c3c;width:0%;transition:width .08s linear;}}
+    </style>
+    <div class="title">⌛ <b>${{buzzer}}</b> đang trả lời từ khoá!</div>
+    <div class="timer-wrap"><div id="timerBar"></div></div>
+    ${{isMeBuzzer?`<div style="display:flex;" id="r3FinalWrap">
+      <input id="r3FinalAns" type="text" placeholder="Ghi từ khoá quan trọng ở đây" autofocus
+        style="flex:1;max-width:340px;padding:14px 16px;font-size:1rem;border:none;border-radius:8px 0 0 8px;outline:none;color:#222;">
+      <button onclick="r3FinalSubmit()" style="padding:14px 22px;background:#f1c40f;color:#1a1a2e;border:none;border-radius:0 8px 8px 0;font-weight:900;cursor:pointer;">Submit</button>
+    </div>`:'<div style="color:#aad4f5;font-style:italic;">Chờ '+buzzer+' trả lời...</div>'}}
+  `);
+  startTimer();
+  const inp=document.getElementById("r3FinalAns");
+  if(inp)inp.addEventListener("keydown",e=>{{if(e.key==="Enter")r3FinalSubmit();}});
+}}
+
+let r3finalSubmitted=false;
+function r3FinalSubmit(){{
+  if(r3finalSubmitted)return;
+  const inp=document.getElementById("r3FinalAns");
+  if(!inp||!inp.value.trim())return;
+  r3finalSubmitted=true;
+  const myName=sessionStorage.getItem("uName");
+  fetch("/?r3_final_submit=1&player="+encodeURIComponent(myName)+"&answer="+encodeURIComponent(inp.value.trim()));
+  const wrap=document.getElementById("r3FinalWrap");
+  if(wrap)wrap.innerHTML='<div style="color:#27ae60;font-weight:bold;">✅ Đã nộp!</div>';
+}}
+
+function showR3FinalResult(d,isAdmin,myName){{
+  stopTimer();
+  const buzzer=d.r3_buzzer;
+  const ans=d.r3_submitted&&d.r3_submitted[buzzer];
+  setBody(`
+    <style>
+      body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;font-family:'Segoe UI',sans-serif;color:white;}}
+    </style>
+    <div style="font-size:2rem;font-weight:900;color:#e74c3c;">❌ ${{buzzer}}: ${{ans||"(Hết giờ)"}}</div>
+    <div style="color:#aad4f5;font-style:italic;">Sai rồi! ${{buzzer}} bị loại. Chờ người khác bấm chuông...</div>
+  `);
+}}
+
+
+/* ══════════════ KẾT THÚC ══════════════ */
+function showFinished(d){{
+  stopTimer();
+  const scores=d.scores||{{}};
+  const sorted=[...d.player_order].sort((a,b)=>(scores[b]||0)-(scores[a]||0));
+  const isAdmin=sessionStorage.getItem("role")==="admin";
+  // Lấy thông tin tuần từ server
+  fetch("/?week_info=1").then(r=>r.json()).then(winfo=>{{
+    const weekNum=winfo.week_count;
+    const finalsMode=winfo.finals_mode;
+    const winner=sorted[0];
+    const runnerUp=sorted[1];
+    const loser=sorted[sorted.length-1];
+
+    let weekBadge="";
+    if(!finalsMode){{
+      weekBadge=`<div style="color:#aad4f5;font-size:1rem;">📅 Tuần ${{weekNum}}/3</div>`;
+    }}else{{
+      weekBadge=`<div style="color:#f1c40f;font-size:1.1rem;font-weight:bold;">🏆 KẾT QUẢ CHUNG KẾT</div>`;
+    }}
+
+    // Thông báo đặc biệt
+    let notices="";
+    if(!finalsMode){{
+      notices=`<div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;">
+        <div style="padding:10px 18px;background:rgba(241,196,15,.15);border:1px solid #f1c40f;border-radius:10px;font-size:.9rem;">
+          👑 <b>${{winner}}</b> → vào chung kết!
+        </div>
+        <div style="padding:10px 18px;background:rgba(231,76,60,.15);border:1px solid #e74c3c;border-radius:10px;font-size:.9rem;">
+          🚫 <b>${{loser}}</b> → bị loại!
+        </div>
+      </div>`;
+      if(weekNum>=3){{
+        const best=winfo.week_results.reduce((a,b)=>b.runner_up_score>a.runner_up_score?b:a);
+        notices+=`<div style="padding:10px 18px;background:rgba(52,152,219,.15);border:1px solid #3498db;border-radius:10px;font-size:.9rem;text-align:center;">
+          🥈 Hạng 2 xuất sắc nhất: <b>${{best.runner_up}}</b> (${{best.runner_up_score}}đ) → vào chung kết!
+        </div>`;
+      }}
+    }}
+
+    setBody(`
+      <style>
+        *{{box-sizing:border-box;margin:0;padding:0;}}
+        body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Segoe UI',sans-serif;color:white;gap:18px;position:relative;}}
+        h1{{color:#f1c40f;font-size:2.2rem;font-weight:900;text-shadow:0 0 20px rgba(241,196,15,.6);}}
+        table{{border-collapse:collapse;width:500px;background:rgba(255,255,255,.07);border-radius:16px;overflow:hidden;}}
+        th{{background:rgba(255,255,255,.1);padding:12px 20px;text-align:left;color:#aad4f5;}}
+        td{{padding:14px 20px;border-bottom:1px solid rgba(255,255,255,.07);}}
+        tr:last-child td{{border:none;}}
+        .out-btn{{position:fixed;bottom:28px;right:32px;padding:12px 28px;background:#e74c3c;color:white;border:none;border-radius:10px;font-size:1rem;font-weight:900;cursor:pointer;box-shadow:0 4px 18px rgba(231,76,60,.5);z-index:999;}}
+      </style>
+      <h1>🏆 KẾT QUẢ CUỘC THI</h1>
+      ${{weekBadge}}
+      <table>
+        <tr><th>#</th><th>Thí sinh</th><th style="text-align:center;">Điểm</th></tr>
+        ${{sorted.map((n,i)=>{{
+          const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"4️⃣";
+          return '<tr><td style="text-align:center;font-size:1.3rem;">'+medal+'</td>'
+            +'<td style="font-weight:bold;">'+n+'</td>'
+            +'<td style="color:#f1c40f;font-weight:900;font-size:1.2rem;text-align:center;">'+(scores[n]||0)+' đ</td></tr>';
+        }}).join("")}}
+      </table>
+      ${{notices}}
+      <button class="out-btn" onclick="outGame()">Out Game</button>`);
+  }}).catch(()=>{{
+    // Fallback nếu fetch lỗi
+    setBody('<div style="color:white;font-size:2rem;text-align:center;padding:40px;">🏆 Kết thúc!</div><button onclick="outGame()" style="padding:14px 30px;background:#e74c3c;color:white;border:none;border-radius:10px;font-size:1rem;font-weight:bold;cursor:pointer;">Out Game</button>');
+  }});
+}}
+
+/* ── helpers ── */
+function gameCSS(){{
+  return `
+    *{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{height:100vh;width:100vw;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);display:grid;grid-template-columns:280px 1fr;font-family:'Segoe UI',sans-serif;color:white;overflow:hidden;}}
+    .lp{{display:flex;flex-direction:column;justify-content:center;gap:22px;padding:40px 0 40px 50px;}}
+    .pname{{font-size:1.8rem;font-weight:bold;color:#aad4f5;display:flex;align-items:center;justify-content:space-between;padding-right:16px;}}
+    .pname.hl{{color:#f1c40f;animation:blink 1s ease-in-out infinite;}}
+    @keyframes blink{{0%,100%{{opacity:1;}}50%{{opacity:.2;}}}}
+    .pscore{{font-size:1rem;}}
+    .rp{{display:flex;flex-direction:column;justify-content:center;padding:30px 50px 30px 20px;}}
+    .q-label{{color:#aad4f5;font-size:.9rem;margin-bottom:8px;}}
+    .oly-table{{width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.4);}}
+    .oly-table th{{background:#4caf50;color:white;padding:12px 10px;font-size:.9rem;text-align:center;border-right:2px solid rgba(255,255,255,.2);transition:all .3s;}}
+    .oly-table th:last-child{{border-right:none;}}
+    .th-buzzer{{background:#f39c12!important;animation:thblink .6s ease-in-out infinite!important;}}
+    @keyframes thblink{{0%,100%{{background:#f39c12;}}50%{{background:#d68910;}}}}
+    .sc{{font-size:.75rem;font-weight:normal;opacity:.9;}}
+    .q-row td{{background:#1565c0;color:white;padding:18px 20px;font-size:1.05rem;font-weight:bold;line-height:1.6;}}
+    .timer-row td{{padding:0;height:10px;background:#e74c3c;position:relative;overflow:hidden;}}
+    #timerBar{{position:absolute;top:0;left:0;height:100%;background:#555;width:0%;transition:width .08s linear;}}
+    .ans-row td{{padding:0;background:white;}}
+    .status-row td{{background:rgba(255,255,255,.05);padding:8px 20px;font-size:.85rem;color:#aad4f5;text-align:center;}}`;
+}}
+
+function renderLeft(players,myName,scores,curPlayer,answers){{
+  const el=document.getElementById("leftPanel");
+  if(!el)return;
+  el.innerHTML=players.map(n=>{{
+    const sc=scores[n]||0;
+    return `<div class="pname ${{n===myName?"hl":""}}">${{n}}<span class="pscore">${{sc}}đ</span></div>`;
+  }}).join("");
+}}
+
+function startTimer(){{
+  stopTimer();
+  timerInterval=setInterval(()=>{{
+    remaining=Math.max(0,remaining-0.05);
+    tickTimer(remaining);
+  }},50);
+}}
+function tickTimer(r){{
+  const bar=document.getElementById("timerBar");
+  if(bar)bar.style.width=((1-r/TL)*100)+"%";
+}}
+function stopTimer(){{if(timerInterval){{clearInterval(timerInterval);timerInterval=null;}}}}
+
+function safeId(name){{return name.replace(/[^a-zA-Z0-9]/g,"_");}}
+
+function setBody(html){{
+  document.body.style.cssText="margin:0;padding:0;overflow:hidden;background:#1a1a2e;";
+  document.body.innerHTML=html;
+}}
+
+window.onload=function(){{
+  try{{
+    const role=sessionStorage.getItem("role");
+    const uName=sessionStorage.getItem("uName");
+    if(!role)return;
+    fetch("/?status=1").then(r=>r.json()).then(data=>{{
+      if(data.phase==="lobby"){{
+        if(role==="admin"){{
+          // Admin reload ở lobby → hiện lại lobby bình thường, không xóa session
+          showLobby("Chủ nhân Olympia 👑",true);
+        }}else{{
+          // Player reload ở lobby → xóa session, bắt đăng nhập lại
+          sessionStorage.clear();
+        }}
+        return;
+      }}
+      showLobby(role==="admin"?"Chủ nhân Olympia 👑":uName,role==="admin");
+    }}).catch(()=>{{
+      showLobby(role==="admin"?"Chủ nhân Olympia 👑":uName,role==="admin");
+    }});
+  }}catch(e){{console.error("onload error:",e);}}
+}};
+</script>
+</body>
+</html>"""
+
+
+
+if __name__ == "__main__":
+    load_persistent_state()
+    server = HTTPServer(("127.0.0.1", 80), MyWebHandler)
+    print("=" * 45)
+    print("✅  Server Olympia đang chạy!")
+    print("🖥️  http://mcchicken.com")
+    print("=" * 45)
+    server.serve_forever()
